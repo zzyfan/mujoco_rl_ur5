@@ -111,7 +111,7 @@ logs/classic/{algo}/{robot}/{run_name}/
 - 若仓库里还存在旧版 `models/{algo}/...`、`logs/{algo}/...` 结果，脚本会在启动时自动同步缺失文件到 `classic` 分层目录
 - `final`：正常训练结束的模型
 - `interrupted`：你按 `Ctrl+C` 中断时保存
-- `best_model`：评估回调认为最优的模型（需开启评估）
+- `best_model`：评估回调认为最优的模型（默认开启，除非传 `--no-save-best-model`）
 
 ## 6. 中断与继续训练（对应 notebook 的“加载已保存模型继续”）
 
@@ -199,6 +199,19 @@ python classic/test.py \
   --render-mode human
 ```
 
+### 7.4 用 `classic/test.py` 测 best_model（对齐 zero 原始脚本习惯）
+
+```bash
+cd /home/zzyfan/mujoco_ur5_rl
+python classic/test.py \
+  --algo sac \
+  --robot ur5_cxy \
+  --model-path logs/classic/sac/ur5_cxy/exp_sac_ur5/best_model/best_model.zip \
+  --norm-path logs/classic/sac/ur5_cxy/exp_sac_ur5/best_model/vec_normalize.pkl \
+  --episodes 3 \
+  --render-mode human
+```
+
 ## 8. 评估与退出速度建议
 
 如果你希望“训练退出更快”，可以关闭评估回调：
@@ -223,6 +236,7 @@ python classic/test.py \
 - `--lock-camera / --free-camera`：锁定固定相机或自由拖动相机
 - `--run-name`：本次实验名（决定保存目录）
 - `--eval-freq`：评估频率（`0` 表示关闭评估）
+- `--no-save-best-model`：关闭 best_model 保存（默认开启）
 - `--resume`：继续训练开关
 - `--skip-replay-buffer`：继续训练时跳过旧 replay buffer 恢复
 - `--ur5-target-*`：UR5 目标采样范围

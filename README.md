@@ -39,6 +39,11 @@ cd /home/zzyfan/mujoco_ur5_rl
 python classic/train.py --algo sac --robot ur5_cxy --run-name exp_sac --timesteps 500000 --device cuda --no-render
 ```
 
+默认行为（对齐 zero 原始 `train_robot_arm.py`）：
+- 评估开启时（`--eval-freq > 0`）会自动保存 `logs/classic/{algo}/{robot}/{run_name}/best_model/`
+- 训练结束会保存 `final/model.zip` 与 `final/vec_normalize.pkl`
+- 如需关闭 best 保存可加 `--no-save-best-model`
+
 ### 2.4 Docker（GPU）
 
 构建镜像：
@@ -144,6 +149,7 @@ logs/mjx/{algo}/{robot}/{run_name}/
 - `classic/train.py` 默认读写 `models/classic/...` 与 `logs/classic/...`
 - 如果仓库里还存在旧的 `models/{algo}/...`、`logs/{algo}/...` 结果，脚本会在启动时自动同步缺失文件到 `classic` 分层目录
 - 后续建议统一只看 `classic` 这套目录，避免继续依赖旧路径回退
+- 默认会保存 `best_model`（除非显式传入 `--no-save-best-model`）
 
 ## 5. 中断与继续训练
 
@@ -216,6 +222,18 @@ python classic/test.py \
   --robot ur5_cxy \
   --model-path models/classic/sac/ur5_cxy/exp_sac/final/model.zip \
   --norm-path models/classic/sac/ur5_cxy/exp_sac/final/vec_normalize.pkl \
+  --episodes 3 \
+  --render-mode human
+```
+
+### 6.4 测试评估出的最佳模型（best_model）
+
+```bash
+python classic/test.py \
+  --algo sac \
+  --robot ur5_cxy \
+  --model-path logs/classic/sac/ur5_cxy/exp_sac/best_model/best_model.zip \
+  --norm-path logs/classic/sac/ur5_cxy/exp_sac/best_model/vec_normalize.pkl \
   --episodes 3 \
   --render-mode human
 ```

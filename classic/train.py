@@ -48,6 +48,7 @@ class TrainArgs:
     run_name: str = "ur5_mujoco"  # 运行名（拼接到模型文件名）。
     eval_freq: int = 5000  # 评估频率（每多少步评估一次）。
     n_eval_episodes: int = 1  # 每次评估回合数（越小越快）。
+    save_best_model: bool = True  # 评估时默认保存 best_model 与对应 VecNormalize（对齐 zero 原始脚本）。
     render_freq: int = 1  # 渲染频率（每多少个回调 step 渲染一次）。
     log_interval: int = 1000  # SB3 日志间隔。
     batch_size: int = 512  # 小批量大小（UR5 默认优化值）。
@@ -657,22 +658,29 @@ def train(args: TrainArgs):
         eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, training=False)  # 评估只归一化观测。
         eval_env.obs_rms = env.obs_rms  # 共享训练环境的观测统计量。
 
-        os.makedirs(paths["best_model_dir"], exist_ok=True)  # 创建最优模型目录。
+        best_model_save_path = None
+        if args.save_best_model:
+            os.makedirs(paths["best_model_dir"], exist_ok=True)  # 创建最优模型目录。
+            best_model_save_path = paths["best_model_dir"]
         eval_callback = EvalCallback(  # SB3 评估回调。
             eval_env,  # 评估环境。
-            best_model_save_path=paths["best_model_dir"],  # 最优模型保存目录。
+            best_model_save_path=best_model_save_path,  # 可选：最优模型保存目录。
             log_path=paths["log_run_dir"],  # 评估日志目录（按算法独立）。
             eval_freq=max(args.eval_freq, 1),  # 防止评估频率为 0。
             n_eval_episodes=max(args.n_eval_episodes, 1),  # 每次评估回合数。
             deterministic=True,  # 评估用确定性策略。
             render=False,  # 评估时不渲染。
         )
-        save_norm_callback = SaveVecNormalizeCallback(  # 最优模型刷新时同步保存 VecNormalize。
-            eval_callback=eval_callback,  # 关联评估回调。
-            save_path=paths["best_norm"],  # 归一化统计文件路径。
-            verbose=1,  # 打印保存日志。
-        )
-        callbacks = [eval_callback, save_norm_callback, interrupt_callback]  # 启用评估与中断回调。
+        callbacks = [eval_callback, interrupt_callback]  # 启用评估与中断回调。
+        if args.save_best_model:
+            save_norm_callback = SaveVecNormalizeCallback(  # 最优模型刷新时同步保存 VecNormalize。
+                eval_callback=eval_callback,  # 关联评估回调。
+                save_path=paths["best_norm"],  # 归一化统计文件路径。
+                verbose=1,  # 打印保存日志。
+            )
+            callbacks = [eval_callback, save_norm_callback, interrupt_callback]
+        else:
+            print("评估已开启，但已禁用 best_model 保存（--no-save-best-model）。")
     else:
         print("评估回调已关闭（--eval-freq 0），训练结束会更快退出。")  # 提示当前是快速退出模式。
     if args.render:  # 开启训练渲染时追加渲染回调。
@@ -719,7 +727,10 @@ def train(args: TrainArgs):
     print(f"训练完成，总耗时 {elapsed:.2f}s")  # 输出总耗时。
     print(f"最终模型路径: {paths['final_model']}.zip")  # 输出模型路径。
     print(f"最终归一化路径: {paths['final_norm']}")  # 输出归一化路径。
-    print(f"最优模型目录: {paths['best_model_dir']}")  # 输出最优模型目录。
+    if args.save_best_model:
+        print(f"最优模型目录: {paths['best_model_dir']}")  # 输出最优模型目录。
+    else:
+        print("最优模型保存: 已关闭（仅保留评估日志）。")
 
 
 def test(args: TrainArgs):
@@ -790,6 +801,9 @@ def parse_args() -> TrainArgs:
     p.add_argument("--run-name", type=str, default="ur5_mujoco")  # 运行名称。
     p.add_argument("--eval-freq", type=int, default=5000)  # 评估频率。
     p.add_argument("--n-eval-episodes", type=int, default=1)  # 每次评估回合数。
+    p.add_argument("--save-best-model", action="store_true", dest="save_best_model")  # 开启最优模型保存。
+    p.add_argument("--no-save-best-model", action="store_false", dest="save_best_model")  # 关闭最优模型保存。
+    p.set_defaults(save_best_model=True)
     p.add_argument("--render-freq", type=int, default=1)  # 渲染频率。
     p.add_argument("--log-interval", type=int, default=1000)  # 日志间隔。
     p.add_argument("--batch-size", type=int, default=512)  # batch 大小（UR5 默认优化值）。
@@ -848,6 +862,7 @@ def parse_args() -> TrainArgs:
         run_name=ns.run_name,  # 运行名。
         eval_freq=ns.eval_freq,  # 评估频率。
         n_eval_episodes=ns.n_eval_episodes,  # 每次评估回合数。
+        save_best_model=ns.save_best_model,  # 评估时是否保存 best_model。
         render_freq=ns.render_freq,  # 渲染频率。
         log_interval=ns.log_interval,  # 日志间隔。
         batch_size=ns.batch_size,  # batch 大小。
