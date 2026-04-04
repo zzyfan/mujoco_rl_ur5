@@ -62,6 +62,8 @@ class TrainArgs:
     max_steps: int = 3000  # 单回合最大步数。
     success_threshold: float = 0.01  # 到点成功阈值（米）。
     frame_skip: int = 1  # 每个 RL step 对应 MuJoCo 积分步数。
+    physics_backend: str = "mujoco"  # 物理后端：mujoco（默认）/warp/auto（优先 warp）。
+    legacy_zero_ee_velocity: bool = False  # 是否兼容 zero 原始 `cvel[:3]` 末端速度读取。
     robot: str = "ur5_cxy"  # 机械臂模型：`ur5_cxy` 或 `zero_robotiq`。
     lock_camera: bool = False  # 是否锁定到 XML 固定相机（默认 False，可鼠标拖动）。
     ur5_target_x_min: float = -0.95  # UR5 目标采样范围 x 最小值。
@@ -228,6 +230,8 @@ def _make_env(args: TrainArgs, render_mode: str | None = None):
     """构造 `make_vec_env` 需要的 `env_kwargs`。"""
     cfg = MujocoEnvConfig(  # 把训练参数映射成环境配置对象。
         frame_skip=args.frame_skip,  # 仿真 frame-skip。
+        physics_backend=args.physics_backend,  # 物理后端选择。
+        legacy_zero_ee_velocity=args.legacy_zero_ee_velocity,  # 是否沿用 zero 原始末端速度读取。
         max_steps=args.max_steps,  # 单回合最大步数。
         success_threshold=args.success_threshold,  # 成功判定阈值。
         viewer_lock_camera=args.lock_camera,  # 是否锁定固定相机。
@@ -586,6 +590,7 @@ def train(args: TrainArgs):
         print("请求使用 cuda，但当前不可用，自动回退到 cpu")  # 打印设备回退提示。
         device = "cpu"  # 设置为 CPU。
     print(f"当前训练设备: {device}")  # 打印最终设备。
+    print(f"classic 物理后端: {args.physics_backend}")  # 打印物理后端设置。
 
     base_env = _make_train_vec_env(args, train_render_mode)  # 创建训练用向量化环境。
 
@@ -745,12 +750,13 @@ def test(args: TrainArgs):
     if device.startswith("cuda") and not torch.cuda.is_available():  # CUDA 不可用时回退。
         print("请求使用 cuda，但当前不可用，自动回退到 cpu")  # 提示回退。
         device = "cpu"  # 使用 CPU。
+    print(f"classic 物理后端: {args.physics_backend}")  # 打印物理后端设置。
 
     env = make_vec_env(  # 创建测试环境。
         ENV_ID,  # 环境 id。
         n_envs=1,  # 测试阶段 1 环境即可。
         seed=args.seed + 2,  # 与训练/评估使用不同种子。
-        env_kwargs=_make_env(args, args.render_mode),  # 测试可渲染。
+        env_kwargs=_make_env(args, args.render_mode if args.render else None),  # 测试时按 render 开关决定是否创建渲染上下文。
     )
     if os.path.exists(norm_path):  # 有归一化文件时加载。
         env = VecNormalize.load(norm_path, env)  # 载入归一化统计。
@@ -771,8 +777,9 @@ def test(args: TrainArgs):
             action, _states = model.predict(obs, deterministic=True)  # 用确定性策略输出动作。
             obs, reward, done, _info = env.step(action)  # VecEnv step 返回 4 元组。
             total += float(reward[0]) if isinstance(reward, np.ndarray) else float(reward)  # 兼容标量/数组奖励。
-            env.render()  # 刷新可视化窗口。
-            if args.render_mode == "human":  # human 模式下稍微 sleep，避免画面过快。
+            if args.render:
+                env.render()  # 刷新可视化窗口。
+            if args.render and args.render_mode == "human":  # human 模式下稍微 sleep，避免画面过快。
                 time.sleep(0.01)  # 10ms 间隔。
             steps += 1  # 步数 +1。
         print(f"第 {ep + 1} 回合: 步数={steps}, 奖励={total:.3f}")  # 打印单回合结果。
@@ -817,6 +824,8 @@ def parse_args() -> TrainArgs:
     p.add_argument("--max-steps", type=int, default=3000)  # 单回合最大步数。
     p.add_argument("--success-threshold", type=float, default=0.01)  # 成功阈值。
     p.add_argument("--frame-skip", type=int, default=1)  # frame-skip。
+    p.add_argument("--physics-backend", choices=["auto", "mujoco", "warp"], default="mujoco")  # 物理后端。
+    p.add_argument("--legacy-zero-ee-velocity", action="store_true")  # 兼容 zero 原始 `cvel[:3]` 末端速度读取。
     p.add_argument("--robot", choices=["ur5_cxy", "zero_robotiq"], default="ur5_cxy")  # 机械臂模型选择。
     p.add_argument("--lock-camera", action="store_true", dest="lock_camera")  # 锁定到固定相机。
     p.add_argument("--free-camera", action="store_false", dest="lock_camera")  # 使用自由相机。
@@ -876,6 +885,8 @@ def parse_args() -> TrainArgs:
         max_steps=ns.max_steps,  # 单回合最大步数。
         success_threshold=ns.success_threshold,  # 成功阈值。
         frame_skip=ns.frame_skip,  # frame-skip。
+        physics_backend=ns.physics_backend,  # 物理后端。
+        legacy_zero_ee_velocity=ns.legacy_zero_ee_velocity,  # 是否兼容 zero 原始末端速度读取。
         robot=ns.robot,  # 机械臂模型选择。
         lock_camera=ns.lock_camera,  # 是否锁定固定相机。
         ur5_target_x_min=ns.ur5_target_x_min,  # UR5 目标范围 x 最小值。

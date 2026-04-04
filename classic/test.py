@@ -49,12 +49,16 @@ def parse_args():
     parser.add_argument("--episodes", type=int, default=3)  # 测试回合数。
     parser.add_argument("--max-steps", type=int, default=3000)  # 每回合最大步数。
     parser.add_argument("--device", type=str, default="cuda")  # 推理设备。
+    parser.add_argument("--physics-backend", choices=["auto", "mujoco", "warp"], default="mujoco")  # 物理后端。
+    parser.add_argument("--legacy-zero-ee-velocity", action="store_true", help="兼容 zero 原始 `cvel[:3]` 末端速度读取")
     parser.add_argument("--robot", choices=["ur5_cxy", "zero_robotiq"], default="ur5_cxy")  # 机械臂模型选择。
     parser.add_argument("--render", action="store_true", help="启用渲染（默认关闭，避免无头环境卡住）")
     parser.add_argument("--no-render", action="store_false", dest="render", help="关闭渲染")
     parser.set_defaults(render=False)
     parser.add_argument("--render-mode", choices=["human", "rgb_array"], default="human")  # 渲染模式。
     parser.add_argument("--random-policy", action="store_true", help="不加载模型，使用随机动作测试环境")  # 随机动作模式。
+    parser.add_argument("--print-step-reward", action="store_true", help="打印每一步奖励与关键信息")
+    parser.add_argument("--print-reward-info", action="store_true", help="打印环境 info 里的奖励分项（若存在）")
     return parser.parse_args()  # 返回解析结果。
 
 
@@ -83,6 +87,8 @@ def main():
     env_cfg = TrainArgs(  # 复用 TrainArgs 与 _make_env，保证环境参数风格一致。
         algo=args.algo,  # 算法名（仅用于后续一致性）。
         robot=args.robot,  # 机械臂模型（与训练时保持一致）。
+        physics_backend=args.physics_backend,  # 物理后端选择（默认 auto）。
+        legacy_zero_ee_velocity=bool(args.legacy_zero_ee_velocity),  # 是否兼容 zero 原始末端速度读取。
         render=bool(args.render),  # 测试是否渲染由命令行控制。
         render_mode=args.render_mode,  # 渲染模式。
         max_steps=args.max_steps,  # 单回合最大步数。
@@ -129,8 +135,21 @@ def main():
                 obs, reward, done, info = env.step(action)  # VecEnv step 返回 4 元组。
                 if args.render:
                     env.render()  # 按需刷新渲染窗口。
-                total_reward += float(reward[0]) if isinstance(reward, np.ndarray) else float(reward)  # 兼容数组/标量奖励。
+                step_reward = float(reward[0]) if isinstance(reward, np.ndarray) else float(reward)  # 兼容数组/标量奖励。
+                total_reward += step_reward
                 steps += 1  # 步数累加。
+                if args.print_step_reward:
+                    info0 = info[0] if isinstance(info, (list, tuple)) and len(info) > 0 else {}
+                    distance = info0.get("distance")
+                    success = info0.get("success")
+                    if distance is None:
+                        print(f"[step {steps}] reward={step_reward:.6f}")
+                    else:
+                        print(f"[step {steps}] reward={step_reward:.6f}, distance={float(distance):.6f}, success={bool(success)}")
+                    if args.print_reward_info:
+                        reward_info = info0.get("reward_info")
+                        if isinstance(reward_info, dict):
+                            print(f"  reward_info={reward_info}")
                 if args.render and args.render_mode == "human":  # human 模式下减速，便于观察。
                     time.sleep(0.01)  # 每步暂停 10ms。
             print(f"Episode {ep + 1}: steps={steps}, reward={total_reward:.3f}")  # 输出回合结果。

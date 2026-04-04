@@ -28,6 +28,15 @@ import gymnasium as gym
 import mujoco
 import numpy as np
 from gymnasium import spaces
+try:
+    import mujoco_warp as mjwarp
+    import warp as wp
+
+    WARP_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # pragma: no cover - 依赖本机运行环境
+    mjwarp = None
+    wp = None
+    WARP_IMPORT_ERROR = exc
 
 try:
     # `mujoco.viewer` 需要显式导入，不能假设 `mujoco` 顶层一定挂载 viewer 子模块。
@@ -37,6 +46,35 @@ except Exception:
 
 
 ENV_ID = "UR5MujocoReach-v0"
+_WARP_INITIALIZED = False
+
+
+def _warp_available() -> bool:
+    return mjwarp is not None and wp is not None
+
+
+def _ensure_warp_runtime() -> None:
+    global _WARP_INITIALIZED
+    if not _warp_available():
+        raise RuntimeError(f"请求使用 MuJoCo Warp，但当前不可用: {WARP_IMPORT_ERROR!r}")
+    if _WARP_INITIALIZED:
+        return
+    wp.init()
+    _WARP_INITIALIZED = True
+
+
+def _resolve_physics_backend(requested: str) -> str:
+    choice = str(requested or "auto").lower()
+    if choice not in {"auto", "mujoco", "warp"}:
+        raise ValueError(f"不支持的物理后端: {requested}")
+    if choice == "mujoco":
+        return "mujoco"
+    if choice == "warp":
+        if not _warp_available():
+            raise RuntimeError(f"请求使用 MuJoCo Warp，但当前不可用: {WARP_IMPORT_ERROR!r}")
+        return "warp"
+    # auto：优先 warp，不可用则回退经典 MuJoCo
+    return "warp" if _warp_available() else "mujoco"
 
 
 @dataclass
@@ -70,6 +108,11 @@ class MujocoEnvConfig:
     fixed_target_z: Optional[float] = None
     # zero 原始项目兼容模式：启用原始目标采样与奖励公式。
     zero_original_mode: bool = False
+    # 物理后端：mujoco（经典 CPU）/warp（MuJoCo Warp）/auto（优先 warp）。
+    physics_backend: str = "mujoco"
+    # 兼容 zero 原始项目：沿用旧版 `cvel[:3]` 作为末端速度。
+    # 默认关闭，改为使用“两指中心点”的有限差分线速度。
+    legacy_zero_ee_velocity: bool = False
 
     # 扭矩动作范围（与 zero-arm 一致）。
     torque_low: float = -15.0
@@ -159,6 +202,13 @@ class UR5MujocoEnv(gym.Env):
         # - MjData: 动态状态（qpos/qvel/ctrl/contact 等会随时间变化的数据）。
         self.model = mujoco.MjModel.from_xml_path(str(xml_path))
         self.data = mujoco.MjData(self.model)
+        self.physics_backend = _resolve_physics_backend(self.config.physics_backend)
+        self.model_warp = None
+        self.data_warp = None
+        if self.physics_backend == "warp":
+            _ensure_warp_runtime()
+            self.model_warp = mjwarp.put_model(self.model)
+            self.data_warp = mjwarp.put_data(self.model, self.data, nworld=1)
         if self.config.render_camera_name:
             self._render_camera_id = mujoco.mj_name2id(
                 self.model,
@@ -240,6 +290,13 @@ class UR5MujocoEnv(gym.Env):
         self.target_pos = np.zeros(3, dtype=np.float32)
         self.prev_torque = np.zeros(6, dtype=np.float32)
         self.prev_joint_vel = np.zeros(6, dtype=np.float32)
+        self._warp_qpos: Optional[np.ndarray] = None
+        self._warp_qvel: Optional[np.ndarray] = None
+        self._warp_xpos: Optional[np.ndarray] = None
+        self._warp_cvel: Optional[np.ndarray] = None
+        self._warp_ncon: int = 0
+        self.prev_ee_pos: Optional[np.ndarray] = None
+        self.current_ee_vel = np.zeros(3, dtype=np.float32)
         self.prev_distance: Optional[float] = None
         self.min_distance: Optional[float] = None
         self.step_count = 0
@@ -380,30 +437,65 @@ class UR5MujocoEnv(gym.Env):
 
     def _get_ee_pos(self) -> np.ndarray:
         """读取夹爪两指中心点的位置。"""
-        left_pos = self.data.xpos[self.left_finger_body_id]
-        right_pos = self.data.xpos[self.right_finger_body_id]
+        if self.physics_backend == "warp" and self._warp_xpos is not None:
+            left_pos = self._warp_xpos[self.left_finger_body_id]
+            right_pos = self._warp_xpos[self.right_finger_body_id]
+        else:
+            left_pos = self.data.xpos[self.left_finger_body_id]
+            right_pos = self.data.xpos[self.right_finger_body_id]
         center = 0.5 * (left_pos + right_pos)
         return center.copy().astype(np.float32)
 
     def _get_target_pos(self) -> np.ndarray:
         """读取目标体中心在世界坐标系下的位置。"""
+        if self.physics_backend == "warp" and self._warp_xpos is not None:
+            return self._warp_xpos[self.target_body_id].copy().astype(np.float32)
         return self.data.xpos[self.target_body_id].copy().astype(np.float32)
 
-    def _get_ee_vel(self, _ee_pos: np.ndarray) -> np.ndarray:
-        """按 zero-arm 逻辑读取末端速度。"""
+    def _get_legacy_ee_vel(self) -> np.ndarray:
+        """兼容 zero 原始项目的旧版末端速度读取。"""
+        if self.physics_backend == "warp" and self._warp_cvel is not None:
+            return self._warp_cvel[self.ee_body_id][:3].copy().astype(np.float32)
         return self.data.cvel[self.ee_body_id][:3].copy().astype(np.float32)
+
+    def _get_ee_vel(self, _ee_pos: np.ndarray) -> np.ndarray:
+        """读取末端速度。
+
+        默认使用“两指中心点”的有限差分线速度，避免把 `cvel[:3]`
+        的角速度误当作末端线速度；兼容模式下可切回 zero 原始实现。
+        """
+        if self.config.legacy_zero_ee_velocity:
+            return self._get_legacy_ee_vel()
+        return self.current_ee_vel.copy().astype(np.float32)
 
     def _get_obs(self) -> np.ndarray:
         """组装 24 维观测向量。"""
         ee_pos = self._get_ee_pos()
         target_pos = self._get_target_pos()
         relative_pos = target_pos - ee_pos
-        joint_pos = self.data.qpos[self.arm_qpos_adr].copy().astype(np.float32)
-        joint_vel = self.data.qvel[self.arm_qvel_adr].copy().astype(np.float32)
+        if self.physics_backend == "warp" and self._warp_qpos is not None and self._warp_qvel is not None:
+            joint_pos = self._warp_qpos[self.arm_qpos_adr].copy().astype(np.float32)
+            joint_vel = self._warp_qvel[self.arm_qvel_adr].copy().astype(np.float32)
+        else:
+            joint_pos = self.data.qpos[self.arm_qpos_adr].copy().astype(np.float32)
+            joint_vel = self.data.qvel[self.arm_qvel_adr].copy().astype(np.float32)
         ee_vel = self._get_ee_vel(ee_pos)
         # Gym/SB3 约定观测必须是 numpy 数组；
         # 统一为 float32 可以减少训练时 dtype 转换开销。
         return np.concatenate([relative_pos, joint_pos, joint_vel, self.prev_torque, ee_vel]).astype(np.float32)
+
+    def _sync_warp_cache(self) -> None:
+        """只拉取观测与奖励所需的小数组，减少 host<->device 往返。"""
+        if self.physics_backend != "warp" or self.data_warp is None:
+            return
+        self._warp_qpos = self.data_warp.qpos.numpy()[0]
+        self._warp_qvel = self.data_warp.qvel.numpy()[0]
+        self._warp_xpos = self.data_warp.xpos.numpy()[0]
+        self._warp_cvel = self.data_warp.cvel.numpy()[0]
+        if getattr(self.data_warp, "nacon", None) is not None:
+            self._warp_ncon = int(self.data_warp.nacon.numpy()[0])
+        else:
+            self._warp_ncon = 0
 
     def reset(self, *, seed: Optional[int] = None, options=None):
         """Gymnasium reset：重置场景并采样新目标。"""
@@ -432,6 +524,7 @@ class UR5MujocoEnv(gym.Env):
         self.min_distance = None
         self.step_count = 0
         self._phase_rewards_given.clear()
+        self.current_ee_vel[:] = 0.0
 
         # 维持参考模型中的重力补偿行为。
         if self.config.enable_gravity_motors:
@@ -439,15 +532,22 @@ class UR5MujocoEnv(gym.Env):
         self.data.ctrl[self.arm_actuator_ids] = 0.0
         # 到点任务：夹爪固定为张开值。
         self.data.ctrl[self.gripper_actuator_ids] = float(self.config.fixed_gripper_ctrl)
+        self.prev_torque[:] = self.data.ctrl[self.arm_actuator_ids].astype(np.float32)
 
         # Gymnasium reset 返回 `(obs, info)`。
         # info 常用于调试信息、额外统计，不直接进入策略网络。
+        if self.physics_backend == "warp":
+            # reset 后把 host 状态同步到 Warp 批量数据容器（nworld=1）。
+            self.data_warp = mjwarp.put_data(self.model, self.data, nworld=1)
+            self._sync_warp_cache()
+        self.prev_ee_pos = self._get_ee_pos()
         obs = self._get_obs()
         # Python 字典语法：用键值对传递额外调试信息。
         info = {
             "target_pos": self.target_pos.copy(),
             "curriculum_stage": self.curriculum_stage,
             "episode_index": int(self.episode_count),
+            "physics_backend": self.physics_backend,
         }
         # 课程计数器在 episode 初始化完成后 +1。
         self.episode_count += 1
@@ -458,7 +558,10 @@ class UR5MujocoEnv(gym.Env):
         """Gymnasium step：输入 6 维关节扭矩动作。"""
         # zero-arm 同款：在写入新动作前，先记录“上一时刻控制量/关节速度”。
         self.prev_torque = self.data.ctrl[self.arm_actuator_ids].copy().astype(np.float32)
-        self.prev_joint_vel = self.data.qvel[self.arm_qvel_adr].copy().astype(np.float32)
+        if self.physics_backend == "warp" and self._warp_qvel is not None:
+            self.prev_joint_vel = self._warp_qvel[self.arm_qvel_adr].copy().astype(np.float32)
+        else:
+            self.prev_joint_vel = self.data.qvel[self.arm_qvel_adr].copy().astype(np.float32)
 
         # 1) 动作清洗与限幅。
         torque_cmd = np.asarray(action, dtype=np.float32).reshape(6)
@@ -471,13 +574,30 @@ class UR5MujocoEnv(gym.Env):
         if self.config.enable_gravity_motors:
             self.data.ctrl[self.gravity_actuator_ids] = float(self.config.gravity_ctrl)
 
-        # 3) 前向仿真。
-        # `frame_skip` 表示一个 RL step 对应多少个 MuJoCo 积分步。
-        for _ in range(int(self.config.frame_skip)):
-            mujoco.mj_step(self.model, self.data)
+        # 3) 前向仿真（按配置切后端）。
+        # `frame_skip` 表示一个 RL step 对应多少个积分步。
+        if self.physics_backend == "warp":
+            ctrl_world = self.data.ctrl[None, :].astype(np.float32)
+            wp.copy(self.data_warp.ctrl, wp.array(ctrl_world))
+            for _ in range(int(self.config.frame_skip)):
+                mjwarp.step(self.model_warp, self.data_warp)
+            self._sync_warp_cache()
+        else:
+            for _ in range(int(self.config.frame_skip)):
+                mujoco.mj_step(self.model, self.data)
 
         # 4) 读取新状态并计算奖励。
         self.step_count += 1
+        ee_pos = self._get_ee_pos()
+        if self.config.legacy_zero_ee_velocity:
+            self.current_ee_vel = self._get_legacy_ee_vel()
+        else:
+            dt = max(float(self.model.opt.timestep) * max(int(self.config.frame_skip), 1), 1e-9)
+            if self.prev_ee_pos is None:
+                self.current_ee_vel[:] = 0.0
+            else:
+                self.current_ee_vel = ((ee_pos - self.prev_ee_pos) / dt).astype(np.float32)
+        self.prev_ee_pos = ee_pos.copy()
         obs = self._get_obs()
         relative_pos = obs[0:3]
         joint_vel = obs[9:15]
@@ -548,7 +668,7 @@ class UR5MujocoEnv(gym.Env):
             action_penalty = -0.001 * float(np.sum(np.square(torque_cmd)))
 
             collision_detected = False
-            collision_contacts = int(self.data.ncon)
+            collision_contacts = self._warp_ncon if self.physics_backend == "warp" else int(self.data.ncon)
             collision_penalty = 0.0
             if collision_contacts > 0:
                 collision_detected = True
@@ -591,6 +711,7 @@ class UR5MujocoEnv(gym.Env):
                 "distance": distance_to_target,
                 "success": success,
                 "target_pos": self.target_pos.copy(),
+                "physics_backend": self.physics_backend,
                 "ee_speed": ee_speed,
                 "collision": collision_detected,
                 "collision_contacts": collision_contacts,
@@ -649,7 +770,7 @@ class UR5MujocoEnv(gym.Env):
 
         # 碰撞惩罚（zero-arm 同款）：任意接触都算碰撞，且按接触点数累加惩罚。
         collision_detected = False
-        collision_contacts = int(self.data.ncon)
+        collision_contacts = self._warp_ncon if self.physics_backend == "warp" else int(self.data.ncon)
         if collision_contacts > 0:
             collision_detected = True
             reward -= float(self.config.collision_penalty_value) * float(collision_contacts)
@@ -681,6 +802,7 @@ class UR5MujocoEnv(gym.Env):
             "distance": distance,
             "success": success,
             "target_pos": self.target_pos.copy(),
+            "physics_backend": self.physics_backend,
             "ee_speed": ee_speed,
             "collision": collision_detected,
             "collision_contacts": collision_contacts,
@@ -693,6 +815,9 @@ class UR5MujocoEnv(gym.Env):
         """按 Gymnasium 的 render_mode 渲染。"""
         if self.render_mode is None:
             return None
+        if self.physics_backend == "warp" and self.data_warp is not None:
+            # 仅在渲染时同步 host 数据，避免训练阶段每步全量回传。
+            mjwarp.get_data_into(self.data, self.model, self.data_warp)
         if self.render_mode == "rgb_array":
             try:
                 if self.renderer is None:
@@ -850,5 +975,5 @@ def register_env() -> None:
     if ENV_ID not in gym.registry:
         gym.register(
             id=ENV_ID,
-            entry_point="env:UR5MujocoEnv",
+            entry_point="classic.env:UR5MujocoEnv",
         )
