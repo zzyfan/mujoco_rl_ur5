@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Training artifacts (very large)
+models/
+models_mjx/
+logs/
+logs_mjx/
+tensorboard/
+
+# System files
+.DS_Store
