@@ -65,14 +65,19 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         fixed_target_x=None,
         fixed_target_y=None,
         fixed_target_z=None,
-        step_penalty=0.1,
-        base_distance_weight=0.8,
-        improvement_gain=1.0,
-        regress_gain=0.8,
-        speed_penalty_threshold=0.5,
-        speed_penalty_value=0.2,
-        direction_reward_gain=1.0,
-        joint_vel_change_penalty_gain=0.03,
+        step_penalty=0.02,
+        base_distance_weight=1.2,
+        improvement_gain=120.0,
+        regress_gain=60.0,
+        speed_penalty_threshold=0.35,
+        speed_penalty_value=0.6,
+        direction_reward_gain=3.0,
+        joint_vel_change_penalty_gain=0.05,
+        action_magnitude_penalty_gain=0.015,
+        action_change_penalty_gain=0.01,
+        idle_distance_threshold=0.08,
+        idle_speed_threshold=0.015,
+        idle_penalty_value=0.08,
         phase_thresholds=(0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002),
         phase_rewards=(100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0),
         success_bonus=10000.0,
@@ -347,6 +352,14 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
 
         joint_vel_change = jp.abs(joint_vel - state.info["prev_joint_vel"])
         reward -= self._config.joint_vel_change_penalty_gain * jp.sum(joint_vel_change)
+
+        reward -= self._config.action_magnitude_penalty_gain * jp.mean(jp.abs(torque_cmd))
+        reward -= self._config.action_change_penalty_gain * jp.mean(jp.abs(torque_cmd - state.info["prev_torque"]))
+        reward -= jp.where(
+            jp.logical_and(distance > self._config.idle_distance_threshold, ee_speed < self._config.idle_speed_threshold),
+            self._config.idle_penalty_value,
+            0.0,
+        )
 
         collision_contacts = self._contact_count(data)  # 碰撞惩罚按有效接触点数累计。
         collision = collision_contacts > 0

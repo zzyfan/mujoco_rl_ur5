@@ -186,6 +186,23 @@ def _build_env_config(args: TrainArgs):
     cfg.fixed_target_x = args.fixed_target_x  # 固定目标点 x。
     cfg.fixed_target_y = args.fixed_target_y  # 固定目标点 y。
     cfg.fixed_target_z = args.fixed_target_z  # 固定目标点 z。
+    # 与 classic 保持同一套奖励结构，并按算法套不同系数。
+    if args.algo == "ppo":
+        cfg.improvement_gain = 220.0  # 更强的接近奖励，帮助 PPO 尽快建立目标导向行为。
+        cfg.regress_gain = 85.0  # 退步惩罚小于接近奖励，给探索保留空间。
+        cfg.direction_reward_gain = 7.0  # 更强调朝目标方向的移动，减少平滑但偏题的运动。
+        cfg.speed_penalty_value = 0.12  # 放松速度惩罚，避免 PPO 被压成缓慢试探。
+        cfg.action_magnitude_penalty_gain = 0.0008  # 大幅放松动作幅值惩罚，让 PPO 更敢动。
+        cfg.action_change_penalty_gain = 0.0005  # 放松动作切换惩罚，让 PPO 更愿意修正轨迹。
+        cfg.idle_penalty_value = 0.6  # 明确惩罚远离目标却几乎不动的状态。
+    else:
+        cfg.improvement_gain = 150.0  # SAC 仍以持续接近目标为主驱动力。
+        cfg.regress_gain = 70.0  # 中等偏上的退步惩罚，抑制目标附近来回游走。
+        cfg.direction_reward_gain = 4.5  # 强化朝目标运动的奖励，减少“有效速度但无效方向”。
+        cfg.speed_penalty_value = 0.45  # 保留一定超速约束，避免过冲。
+        cfg.action_magnitude_penalty_gain = 0.006  # 中等动作幅值惩罚，压制大动作乱甩。
+        cfg.action_change_penalty_gain = 0.004  # 中等动作切换惩罚，减少高频抖动。
+        cfg.idle_penalty_value = 0.15  # 中等静止惩罚，避免 SAC 学成发呆策略。
     return cfg
 
 
