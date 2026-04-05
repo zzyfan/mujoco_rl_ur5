@@ -15,7 +15,10 @@ from brax.io import model as brax_model
 from brax.training.agents.ppo import train as ppo
 from brax.training.agents.sac import train as sac
 from mujoco_playground._src import wrapper
-from tqdm.auto import tqdm
+try:
+    from tqdm.rich import tqdm
+except ImportError:
+    from tqdm.auto import tqdm
 
 if __package__ in (None, ""):
     ROOT = Path(__file__).resolve().parents[1]
@@ -81,7 +84,7 @@ class TrainArgs:
     normalize_observations: bool = True  # 是否启用观测标准化。
     sac_tau: float = 0.005  # SAC 目标网络软更新系数。
     sac_min_replay_size: int = 8192  # SAC 开始更新前要求的最小回放池大小。
-    sac_max_replay_size: int = 262_144  # SAC 回放池容量上限。
+    sac_max_replay_size: int = 3_000_000  # SAC 回放池容量上限。
     sac_grad_updates_per_step: int = 1  # SAC 每轮采样后的梯度更新次数。
     action_repeat: int = 1  # 同一动作重复执行的物理步数。
     episode_length: int = 3000  # 单回合最大决策步数。
@@ -119,7 +122,7 @@ def _parse_args() -> TrainArgs:
     p.add_argument("--normalize-observations", action=argparse.BooleanOptionalAction, default=True)  # 是否标准化观测。
     p.add_argument("--sac-tau", type=float, default=0.005)  # SAC 目标网络软更新系数。
     p.add_argument("--sac-min-replay-size", type=int, default=8192)  # SAC 回放池预热大小。
-    p.add_argument("--sac-max-replay-size", type=int, default=262_144)  # SAC 回放池容量。
+    p.add_argument("--sac-max-replay-size", type=int, default=3_000_000)  # SAC 回放池容量。
     p.add_argument("--sac-grad-updates-per-step", type=int, default=1)  # SAC 每轮采样后的梯度更新次数。
     p.add_argument("--action-repeat", type=int, default=1)  # 同一动作重复执行的物理步数。
     p.add_argument("--episode-length", type=int, default=3000)  # 单回合最大决策步数。
@@ -244,12 +247,7 @@ def _run_train(args: TrainArgs) -> int:
     )
 
     times = [time.monotonic()]  # 用于统计编译和训练耗时。
-    progress_bar = tqdm(
-        total=max(int(args.num_timesteps), 1),
-        desc=f"{args.algo}:{args.robot}",
-        unit="step",
-        dynamic_ncols=True,
-    )
+    progress_bar = tqdm(total=max(int(args.num_timesteps), 1))
     last_step = 0
     final_reward_label = ""
     final_reward_value: float | None = None
