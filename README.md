@@ -83,6 +83,7 @@ python classic/test.py \
 
 - `--algo ppo`：调用 `brax.training.agents.ppo`
 - `--algo sac`：调用 `brax.training.agents.sac`
+- `TD3`：当前 Brax 官方安装包没有提供训练入口，因此 `warp_gpu/` 不支持
 - `--num-envs`：控制并行训练环境数量
 - `--num-eval-envs`：控制并行评估环境数量
 - `--naconmax / --naccdmax / --njmax`：控制 Warp 接触缓存和约束缓存大小
@@ -180,6 +181,7 @@ models/warp_gpu/{algo}/{robot}/{run_name}/
 - `checkpoints/`：Brax 训练过程中保存的阶段参数
 - `config.json`：训练参数、环境参数和 Warp 运行时信息
 - `final_policy.msgpack`：训练结束时导出的最终策略参数
+- `warp_gpu/` 当前只接入官方 Brax 自带的 `PPO / SAC`
 
 ## 推荐工作流
 

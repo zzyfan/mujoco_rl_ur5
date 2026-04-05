@@ -61,15 +61,14 @@ def _resolve_physics_backend(requested: str) -> str:
     return "warp" if _warp_available() else "mujoco"
 
 
-@dataclass  # 这份配置基本决定了“目标点怎么采、什么时候算成功、奖励怎么长什么样”。
+@dataclass  # 这份配置同时定义目标采样、奖励计算、终止条件和渲染参数。
 class MujocoEnvConfig:
     """到点任务参数配置。"""
 
-    # 使用 cxy1997/Robotiq-UR5 的模型。
-    model_xml: str = "assets/robotiq_cxy/lab_env.xml"
-    frame_skip: int = 1
-    max_steps: int = 3000
-    success_threshold: float = 0.01
+    model_xml: str = "assets/robotiq_cxy/lab_env.xml"  # MuJoCo XML 模型路径。
+    frame_skip: int = 1  # 每个环境 step 前向推进的物理步数。
+    max_steps: int = 3000  # 单回合最大决策步数。
+    success_threshold: float = 0.01  # 成功判定距离阈值。
 
     # 目标采样空间（按当前模型可达区设置）。
     target_x_min: float = -0.95
@@ -90,30 +89,25 @@ class MujocoEnvConfig:
     fixed_target_x: Optional[float] = None
     fixed_target_y: Optional[float] = None
     fixed_target_z: Optional[float] = None
-    # 是否启用旧版目标采样和奖励公式。
-    zero_original_mode: bool = False
-    # 物理后端：mujoco（经典 CPU）/warp（MuJoCo Warp）/auto（优先 warp）。
-    physics_backend: str = "mujoco"
-    # 是否启用旧版 `cvel[:3]` 速度读取。
-    legacy_zero_ee_velocity: bool = False
+    zero_original_mode: bool = False  # 切换到兼容旧实验的目标采样和奖励参数。
+    physics_backend: str = "mujoco"  # 物理后端：`mujoco`、`warp` 或 `auto`。
+    legacy_zero_ee_velocity: bool = False  # 是否按兼容公式读取末端速度特征。
 
     # 六个机械臂关节的扭矩范围。
     torque_low: float = -15.0
     torque_high: float = 15.0
     # 到点任务默认保持夹爪打开。
     fixed_gripper_ctrl: float = 0.0
-    # 保持 cxy 模型中目标方块的重力电机设置。
-    enable_gravity_motors: bool = True
-    gravity_ctrl: float = -1.0
+    enable_gravity_motors: bool = True  # 是否向重力补偿电机写入固定控制量。
+    gravity_ctrl: float = -1.0  # 重力补偿电机的固定控制值。
 
-    # 初始姿态参考原仓库。
-    home_pose_mode: str = "ur5_coupled"
-    home_joint1: float = math.radians(29.7)
-    home_joint2: float = math.radians(-85.0)
-    home_joint3: float = math.radians(115.0)
-    home_joint4: float = 0.0
-    home_joint5: float = 0.0
-    home_joint6: float = 0.0
+    home_pose_mode: str = "ur5_coupled"  # 初始姿态写入方式。
+    home_joint1: float = math.radians(29.7)  # 第 1 关节初始角度。
+    home_joint2: float = math.radians(-85.0)  # 第 2 关节初始角度。
+    home_joint3: float = math.radians(115.0)  # 第 3 关节初始角度。
+    home_joint4: float = 0.0  # 第 4 关节初始角度。
+    home_joint5: float = 0.0  # 第 5 关节初始角度。
+    home_joint6: float = 0.0  # 第 6 关节初始角度。
 
     # 奖励项参数。
     step_penalty: float = 0.1
@@ -267,7 +261,7 @@ class UR5MujocoEnv(gym.Env):
         self._phase_rewards_given: set[float] = set()
 
     def _set_home_pose(self) -> None:
-        """设置稳定初始姿态（参考 cxy 原项目）。"""
+        """设置稳定的初始关节姿态。"""
         self.data.qpos[:] = self.home_qpos
         self.data.qvel[:] = self.home_qvel
 
@@ -312,7 +306,7 @@ class UR5MujocoEnv(gym.Env):
         )
 
     def _sample_target_pos_zero_original(self) -> np.ndarray:
-        """旧版目标采样函数。"""
+        """按兼容模式采样目标点。"""
         target = self.np_random.uniform(-0.3, 0.3, size=3).astype(np.float32)
         if target[0] >= 0.0:
             target[0] = max(target[0], 0.1)
@@ -327,10 +321,7 @@ class UR5MujocoEnv(gym.Env):
 
     def _sample_target_pos_curriculum(self) -> np.ndarray:
         """按课程学习阶段采样目标点（自动推进）。"""
-        # Python 语法说明：
-        # - `episode_index` 是当前即将开始的 episode 序号（从 0 开始）。
-        # - 这里用 `self.episode_count` 而不是 `self.step_count`，
-        #   因为课程学习按“回合”推进更稳定。
+        # 课程阶段按已完成回合数推进，而不是按单回合内部步数推进。
         episode_index = int(self.episode_count)
 
         # 第 1 阶段持续回合数，转为 int 避免外部传 float 带来比较歧义。
@@ -412,7 +403,7 @@ class UR5MujocoEnv(gym.Env):
         return self.data.xpos[self.target_body_id].copy().astype(np.float32)
 
     def _get_legacy_ee_vel(self) -> np.ndarray:
-        """旧版末端速度读取。"""
+        """按兼容公式读取末端速度。"""
         if self.physics_backend == "warp" and self._warp_cvel is not None:
             return self._warp_cvel[self.ee_body_id][:3].copy().astype(np.float32)
         return self.data.cvel[self.ee_body_id][:3].copy().astype(np.float32)
@@ -485,7 +476,7 @@ class UR5MujocoEnv(gym.Env):
         self._phase_rewards_given.clear()
         self.current_ee_vel[:] = 0.0
 
-        # 维持参考模型中的重力补偿行为。
+        # 重力补偿电机使用固定控制量。
         if self.config.enable_gravity_motors:
             self.data.ctrl[self.gravity_actuator_ids] = float(self.config.gravity_ctrl)
         self.data.ctrl[self.arm_actuator_ids] = 0.0
@@ -791,7 +782,7 @@ class UR5MujocoEnv(gym.Env):
                 return None
 
         # 某些桌面/X11 场景下，窗口被关闭或 drawable 失效后继续 sync 可能触发 GLX 错误。
-        # 这里先探测 viewer 是否还在运行，不在运行就重置句柄，避免继续向失效窗口提交帧。
+        # 先判断 viewer 是否仍然存活，避免向失效窗口继续提交渲染命令。
         if self.viewer is not None:
             is_running = getattr(self.viewer, "is_running", None)
             if callable(is_running):
@@ -904,7 +895,7 @@ class UR5MujocoEnv(gym.Env):
         if self.viewer is not None:
             viewer = self.viewer
             self.viewer = None
-            # 某些驱动/GLX 场景下 viewer.close 可能阻塞，这里异步关闭避免卡住主线程。
+            # 某些驱动或 GLX 组合下 `viewer.close()` 可能阻塞，因此改成异步关闭。
             def _close_viewer():
                 try:
                     viewer.close()
@@ -922,7 +913,7 @@ class UR5MujocoEnv(gym.Env):
             self.renderer = None
 
 
-def register_env() -> None:  # 环境注册入口：gym.make 和 SB3 创建环境都依赖这里
+def register_env() -> None:  # 环境注册入口，`gym.make` 和 SB3 都会通过它找到环境类。
     """注册 Gymnasium 环境 id。
 
     使用方式：

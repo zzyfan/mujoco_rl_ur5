@@ -29,7 +29,7 @@ else:
 
 @dataclass
 class TrainArgs:
-    algo: str = "ppo"  # Brax 训练器名称。
+    algo: str = "ppo"  # Brax 训练器名称，可选 `ppo`、`sac`。
     robot: str = "ur5_cxy"  # 机器人型号决定 XML、初始姿态和目标采样范围。
     seed: int = 42
     num_timesteps: int = 5_000_000  # 总训练步数。
@@ -60,47 +60,47 @@ class TrainArgs:
     model_dir: str = "models/warp_gpu"  # 配置、checkpoint 和最终参数目录。
     run_name: str = "ur5_reach_warp_gpu"  # 当前实验名称。
     dry_run: bool = False  # 只构建环境和训练配置，不执行训练。
-    fixed_target_x: float | None = None
-    fixed_target_y: float | None = None
-    fixed_target_z: float | None = None
+    fixed_target_x: float | None = None  # 固定目标点 x 坐标；为空时按范围随机采样。
+    fixed_target_y: float | None = None  # 固定目标点 y 坐标；为空时按范围随机采样。
+    fixed_target_z: float | None = None  # 固定目标点 z 坐标；为空时按范围随机采样。
 
 
 def _parse_args() -> TrainArgs:
     p = argparse.ArgumentParser(description="Warp GPU UR5/zero reach 训练入口")
-    p.add_argument("--algo", choices=["ppo", "sac"], default="ppo")
-    p.add_argument("--robot", choices=["ur5_cxy", "zero_robotiq"], default="ur5_cxy")
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--num-timesteps", type=int, default=5_000_000)
-    p.add_argument("--num-envs", type=int, default=256)
-    p.add_argument("--num-eval-envs", type=int, default=128)
-    p.add_argument("--num-evals", type=int, default=10)
-    p.add_argument("--learning-rate", type=float, default=3e-4)
-    p.add_argument("--entropy-cost", type=float, default=1e-4)
-    p.add_argument("--discounting", type=float, default=0.99)
-    p.add_argument("--unroll-length", type=int, default=10)
-    p.add_argument("--batch-size", type=int, default=512)
-    p.add_argument("--num-minibatches", type=int, default=8)
-    p.add_argument("--num-updates-per-batch", type=int, default=4)
-    p.add_argument("--reward-scaling", type=float, default=1.0)
-    p.add_argument("--normalize-observations", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--sac-tau", type=float, default=0.005)
-    p.add_argument("--sac-min-replay-size", type=int, default=8192)
-    p.add_argument("--sac-max-replay-size", type=int, default=262_144)
-    p.add_argument("--sac-grad-updates-per-step", type=int, default=1)
-    p.add_argument("--action-repeat", type=int, default=1)
-    p.add_argument("--episode-length", type=int, default=3000)
-    p.add_argument("--frame-skip", type=int, default=1)
-    p.add_argument("--success-threshold", type=float, default=0.01)
-    p.add_argument("--naconmax", type=int, default=128)
-    p.add_argument("--naccdmax", type=int, default=128)
-    p.add_argument("--njmax", type=int, default=64)
-    p.add_argument("--logdir", type=str, default="logs/warp_gpu")
-    p.add_argument("--model-dir", type=str, default="models/warp_gpu")
-    p.add_argument("--run-name", type=str, default="ur5_reach_warp_gpu")
-    p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--fixed-target-x", type=float, default=None)
-    p.add_argument("--fixed-target-y", type=float, default=None)
-    p.add_argument("--fixed-target-z", type=float, default=None)
+    p.add_argument("--algo", choices=["ppo", "sac"], default="ppo")  # 选择 Brax 训练器。
+    p.add_argument("--robot", choices=["ur5_cxy", "zero_robotiq"], default="ur5_cxy")  # 选择机器人模型。
+    p.add_argument("--seed", type=int, default=42)  # 控制目标采样和网络初始化的随机种子。
+    p.add_argument("--num-timesteps", type=int, default=5_000_000)  # 总训练步数。
+    p.add_argument("--num-envs", type=int, default=256)  # 并行训练环境数。
+    p.add_argument("--num-eval-envs", type=int, default=128)  # 并行评估环境数。
+    p.add_argument("--num-evals", type=int, default=10)  # 训练过程中执行评估的次数。
+    p.add_argument("--learning-rate", type=float, default=3e-4)  # 优化器学习率。
+    p.add_argument("--entropy-cost", type=float, default=1e-4)  # PPO 熵正则系数。
+    p.add_argument("--discounting", type=float, default=0.99)  # 奖励折扣因子。
+    p.add_argument("--unroll-length", type=int, default=10)  # PPO rollout 片段长度。
+    p.add_argument("--batch-size", type=int, default=512)  # 参数更新批大小。
+    p.add_argument("--num-minibatches", type=int, default=8)  # PPO 每轮更新拆分的 mini-batch 数。
+    p.add_argument("--num-updates-per-batch", type=int, default=4)  # PPO 每批样本重复更新次数。
+    p.add_argument("--reward-scaling", type=float, default=1.0)  # 训练器内部使用的奖励缩放。
+    p.add_argument("--normalize-observations", action=argparse.BooleanOptionalAction, default=True)  # 是否标准化观测。
+    p.add_argument("--sac-tau", type=float, default=0.005)  # SAC 目标网络软更新系数。
+    p.add_argument("--sac-min-replay-size", type=int, default=8192)  # SAC 回放池预热大小。
+    p.add_argument("--sac-max-replay-size", type=int, default=262_144)  # SAC 回放池容量。
+    p.add_argument("--sac-grad-updates-per-step", type=int, default=1)  # SAC 每轮采样后的梯度更新次数。
+    p.add_argument("--action-repeat", type=int, default=1)  # 同一动作重复执行的物理步数。
+    p.add_argument("--episode-length", type=int, default=3000)  # 单回合最大决策步数。
+    p.add_argument("--frame-skip", type=int, default=1)  # 控制步长相对仿真步长的倍率。
+    p.add_argument("--success-threshold", type=float, default=0.01)  # 成功判定距离阈值。
+    p.add_argument("--naconmax", type=int, default=128)  # 接触缓存容量。
+    p.add_argument("--naccdmax", type=int, default=128)  # CCD 接触缓存容量。
+    p.add_argument("--njmax", type=int, default=64)  # 约束缓存容量。
+    p.add_argument("--logdir", type=str, default="logs/warp_gpu")  # 日志目录。
+    p.add_argument("--model-dir", type=str, default="models/warp_gpu")  # 配置和模型输出目录。
+    p.add_argument("--run-name", type=str, default="ur5_reach_warp_gpu")  # 当前实验名称。
+    p.add_argument("--dry-run", action="store_true")  # 只构建环境和训练参数，不进入训练循环。
+    p.add_argument("--fixed-target-x", type=float, default=None)  # 固定目标点 x 坐标。
+    p.add_argument("--fixed-target-y", type=float, default=None)  # 固定目标点 y 坐标。
+    p.add_argument("--fixed-target-z", type=float, default=None)  # 固定目标点 z 坐标。
     ns = p.parse_args()
     return TrainArgs(
         algo=ns.algo,
@@ -142,16 +142,16 @@ def _parse_args() -> TrainArgs:
 
 def _build_env_config(args: TrainArgs):
     cfg = default_config(args.robot)
-    cfg.frame_skip = max(int(args.frame_skip), 1)  # frame_skip 会同步影响 ctrl_dt。
-    cfg.action_repeat = max(int(args.action_repeat), 1)
-    cfg.episode_length = max(int(args.episode_length), 1)
-    cfg.success_threshold = float(args.success_threshold)
-    cfg.naconmax = max(int(args.naconmax), 1)
-    cfg.naccdmax = max(int(args.naccdmax), 1)
-    cfg.njmax = max(int(args.njmax), 1)
-    cfg.fixed_target_x = args.fixed_target_x
-    cfg.fixed_target_y = args.fixed_target_y
-    cfg.fixed_target_z = args.fixed_target_z
+    cfg.frame_skip = max(int(args.frame_skip), 1)  # `frame_skip` 同时决定 `ctrl_dt`。
+    cfg.action_repeat = max(int(args.action_repeat), 1)  # `action_repeat` 控制同一动作连续执行多少个决策步。
+    cfg.episode_length = max(int(args.episode_length), 1)  # 单回合最大决策步数。
+    cfg.success_threshold = float(args.success_threshold)  # 奖励和终止逻辑共用这个成功阈值。
+    cfg.naconmax = max(int(args.naconmax), 1)  # Warp 接触缓存容量。
+    cfg.naccdmax = max(int(args.naccdmax), 1)  # Warp CCD 接触缓存容量。
+    cfg.njmax = max(int(args.njmax), 1)  # Warp 约束缓存容量。
+    cfg.fixed_target_x = args.fixed_target_x  # 固定目标点 x。
+    cfg.fixed_target_y = args.fixed_target_y  # 固定目标点 y。
+    cfg.fixed_target_z = args.fixed_target_z  # 固定目标点 z。
     return cfg
 
 
@@ -162,15 +162,15 @@ def _run_train(args: TrainArgs) -> int:
     ensure_warp_runtime()
 
     env_cfg = _build_env_config(args)
-    run_dir = Path(args.model_dir).resolve() / args.algo / args.robot / args.run_name
-    ckpt_dir = run_dir / "checkpoints"
+    run_dir = Path(args.model_dir).resolve() / args.algo / args.robot / args.run_name  # 输出目录按算法、机器人和实验名分层。
+    ckpt_dir = run_dir / "checkpoints"  # Brax 中间 checkpoint 写入这个目录。
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    Path(args.logdir).mkdir(parents=True, exist_ok=True)
+    Path(args.logdir).mkdir(parents=True, exist_ok=True)  # 独立创建日志目录，便于追加训练记录。
 
     config_payload = {
-        "train_args": asdict(args),
-        "env_config": env_cfg.to_dict(),
-        "runtime": describe_warp_runtime(),
+        "train_args": asdict(args),  # 保存命令行参数，便于复现实验。
+        "env_config": env_cfg.to_dict(),  # 保存环境配置，便于核对任务定义。
+        "runtime": describe_warp_runtime(),  # 记录实际使用的 Warp 设备信息。
     }
     with (run_dir / "config.json").open("w", encoding="utf-8") as fp:
         json.dump(config_payload, fp, indent=2, ensure_ascii=False)
@@ -192,14 +192,14 @@ def _run_train(args: TrainArgs) -> int:
         full_reset=True,  # full_reset 让回合结束后的目标点重新采样。
     )
 
-    times = [time.monotonic()]
+    times = [time.monotonic()]  # 用于统计编译和训练耗时。
 
     def progress(step: int, metrics) -> None:
         times.append(time.monotonic())
         if "eval/episode_reward" in metrics:
-            print(f"{step}: eval_reward={float(metrics['eval/episode_reward']):.3f}")
+            print(f"{step}: eval_reward={float(metrics['eval/episode_reward']):.3f}")  # 评估奖励用于观察当前策略整回合表现。
         elif "episode/sum_reward" in metrics:
-            print(f"{step}: train_reward={float(metrics['episode/sum_reward']):.3f}")
+            print(f"{step}: train_reward={float(metrics['episode/sum_reward']):.3f}")  # 训练奖励用于观察采样阶段的即时表现。
 
     if args.algo == "ppo":
         train_fn = functools.partial(  # PPO 通过 rollout 收集样本后执行多轮策略更新。
