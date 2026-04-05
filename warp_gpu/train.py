@@ -201,9 +201,11 @@ def _run_train(args: TrainArgs) -> int:
         dynamic_ncols=True,
     )
     last_step = 0
+    final_reward_label = ""
+    final_reward_value: float | None = None
 
     def progress(step: int, metrics) -> None:
-        nonlocal last_step
+        nonlocal last_step, final_reward_label, final_reward_value
         times.append(time.monotonic())
         current_step = max(int(step), 0)
         delta = max(current_step - last_step, 0)
@@ -212,9 +214,13 @@ def _run_train(args: TrainArgs) -> int:
         last_step = current_step
         postfix: dict[str, str] = {}
         if "eval/episode_reward" in metrics:
-            postfix["eval_reward"] = f"{float(metrics['eval/episode_reward']):.3f}"  # 评估奖励用于观察当前策略整回合表现。
+            final_reward_label = "最终评估回报"
+            final_reward_value = float(metrics["eval/episode_reward"])
+            postfix["eval_reward"] = f"{final_reward_value:.3f}"  # 评估奖励用于观察当前策略整回合表现。
         elif "episode/sum_reward" in metrics:
-            postfix["train_reward"] = f"{float(metrics['episode/sum_reward']):.3f}"  # 训练奖励用于观察采样阶段的即时表现。
+            final_reward_label = "最近训练回合回报"
+            final_reward_value = float(metrics["episode/sum_reward"])
+            postfix["train_reward"] = f"{final_reward_value:.3f}"  # 训练奖励用于观察采样阶段的即时表现。
         if postfix:
             progress_bar.set_postfix(postfix)
 
@@ -278,6 +284,8 @@ def _run_train(args: TrainArgs) -> int:
     if len(times) > 1:
         print(f"jit_compile_s={times[1] - times[0]:.2f}")
         print(f"total_train_s={times[-1] - times[0]:.2f}")
+    if final_reward_value is not None:
+        print(f"{final_reward_label}: {final_reward_value:.3f}")  # 输出最后一次可用回报。
     return 0
 
 
