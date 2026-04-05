@@ -88,7 +88,7 @@ class MujocoEnvConfig:
     fixed_target_x: Optional[float] = None
     fixed_target_y: Optional[float] = None
     fixed_target_z: Optional[float] = None
-    zero_original_mode: bool = False  # 切换到兼容旧实验的目标采样和奖励参数。
+    zero_original_mode: bool = False  # 切换到兼容旧实验的目标采样方式。
     physics_backend: str = "mujoco"  # 物理后端：`mujoco`、`warp` 或 `auto`。
     legacy_zero_ee_velocity: bool = False  # 是否按兼容公式读取末端速度特征。
 
@@ -109,14 +109,19 @@ class MujocoEnvConfig:
     home_joint6: float = 0.0  # 第 6 关节初始角度。
 
     # 奖励项参数。
-    step_penalty: float = 0.1
-    base_distance_weight: float = 0.8
-    improvement_gain: float = 1.0
-    regress_gain: float = 0.8
-    speed_penalty_threshold: float = 0.5
-    speed_penalty_value: float = 0.2
-    direction_reward_gain: float = 1.0
-    joint_vel_change_penalty_gain: float = 0.03
+    step_penalty: float = 0.02  # 每步时间惩罚；过大容易让策略倾向“少动少错”。
+    base_distance_weight: float = 1.2  # 基础距离惩罚权重；增大后会更持续地驱动末端靠近目标。
+    improvement_gain: float = 120.0  # 距离变近奖励权重；放大后每一小步接近都会更明显地得到正反馈。
+    regress_gain: float = 60.0  # 距离变远惩罚权重；比接近奖励略小，避免策略因偶发抖动被过度打压。
+    speed_penalty_threshold: float = 0.35  # 末端速度超过该阈值时，判定为“过快”。
+    speed_penalty_value: float = 0.6  # 过快惩罚；增大后会抑制大幅度乱甩。
+    direction_reward_gain: float = 3.0  # 朝目标方向运动的奖励权重；增大后会更鼓励“有目标地移动”。
+    joint_vel_change_penalty_gain: float = 0.05  # 关节速度变化惩罚；增大后可抑制高频抖动。
+    action_magnitude_penalty_gain: float = 0.015  # 扭矩幅值惩罚；约束动作过大导致的乱动。
+    action_change_penalty_gain: float = 0.01  # 相邻两步动作变化惩罚；约束突兀切换。
+    idle_distance_threshold: float = 0.08  # 当距离大于该值时，视作“还远离目标”。
+    idle_speed_threshold: float = 0.015  # 当末端速度低于该值时，视作“几乎不动”。
+    idle_penalty_value: float = 0.08  # 远离目标却几乎不动时的惩罚；用于打破 PPO 的静止策略。
     phase_thresholds: tuple[float, ...] = (0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002)
     phase_rewards: tuple[float, ...] = (100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0)
     success_bonus: float = 10000.0
@@ -556,197 +561,88 @@ class UR5MujocoEnv(gym.Env):
         ee_speed = float(np.linalg.norm(ee_vel))
         reward = 0.0
 
-        if self.config.zero_original_mode:
-            ee_pos = self._get_ee_pos().astype(np.float64)
-            distance_to_target = float(np.linalg.norm(ee_pos - self.target_pos.astype(np.float64)))
-
-            # 1) 密度奖励：靠近目标时更密集。
-            density_reward = 1.2 * (1.0 - math.exp(-2.0 * (0.6 - distance_to_target)))
-            if distance_to_target < 0.001:
-                density_reward += (0.001 - distance_to_target) * 300.0
-            elif distance_to_target < 0.005:
-                density_reward += (0.005 - distance_to_target) * 100.0
-            elif distance_to_target < 0.01:
-                density_reward += (0.01 - distance_to_target) * 50.0
-            elif distance_to_target < 0.05:
-                density_reward += (0.05 - distance_to_target) * 10.0
-            elif distance_to_target < 0.1:
-                density_reward += (0.1 - distance_to_target) * 2.0
-            elif distance_to_target < 0.3:
-                density_reward += (0.3 - distance_to_target) * 0.5
-
-            # 2) 分布奖励：速度与加速度分布。
-            distribution_reward = 0.0
-            if 0.01 <= ee_speed <= 0.1:
-                distribution_reward += 0.5
-            elif 0.005 <= ee_speed < 0.01:
-                distribution_reward += 0.3
-            elif 0.1 < ee_speed <= 0.2:
-                distribution_reward += 0.2
-            elif ee_speed < 0.005:
-                distribution_reward += 0.1
-
-            joint_velocities = joint_vel.astype(np.float64)
-            joint_speeds = np.abs(joint_velocities)
-            avg_joint_speed = float(np.mean(joint_speeds))
-            if joint_speeds.size > 1:
-                speed_std = float(np.std(joint_speeds))
-                if speed_std < avg_joint_speed * 0.5:
-                    distribution_reward += 0.3
-                elif speed_std < avg_joint_speed:
-                    distribution_reward += 0.1
-
-            dt = max(float(self.model.opt.timestep), 1e-9)
-            joint_accelerations = (joint_velocities - self.prev_joint_vel.astype(np.float64)) / dt
-            joint_acc_magnitude = float(np.linalg.norm(joint_accelerations))
-            if joint_acc_magnitude < 10.0:
-                distribution_reward += 0.2
-            elif joint_acc_magnitude < 20.0:
-                distribution_reward += 0.1
-
-            # 3) 平稳性奖励。
-            smoothness_reward = 0.0
-            action_change = float(np.linalg.norm(torque_cmd - self.prev_torque))
-            if action_change < 2.0:
-                smoothness_reward += 0.3
-            elif action_change < 5.0:
-                smoothness_reward += 0.1
-
-            # 4) 惩罚项与其他项。
-            joint_speed_penalty = -0.005 * float(np.sum(np.square(joint_velocities)))
-            action_penalty = -0.001 * float(np.sum(np.square(torque_cmd)))
-
-            collision_detected = False
-            collision_contacts = self._warp_ncon if self.physics_backend == "warp" else int(self.data.ncon)
-            collision_penalty = 0.0
-            if collision_contacts > 0:
-                collision_detected = True
-                collision_penalty -= 100.0 * float(collision_contacts)
-
-            height_penalty = 0.0
-            if float(ee_pos[2]) < 0.05:
-                height_penalty = -5.0 * (0.05 - float(ee_pos[2]))
-            vertical_reward = 0.1 if 0.05 <= float(ee_pos[2]) <= 0.4 else 0.0
-            step_penalty = -0.001 * float(self.step_count)
-
-            reward = (
-                density_reward
-                + distribution_reward
-                + smoothness_reward
-                + joint_speed_penalty
-                + action_penalty
-                + collision_penalty
-                + height_penalty
-                + vertical_reward
-                + step_penalty
-            )
-
-            success = distance_to_target < float(self.config.success_threshold)
-            terminated = bool(success or collision_detected)
-            truncated = self.step_count >= int(self.config.max_steps)
-            if success:
-                success_reward = 200.0
-                if ee_speed < 0.01:
-                    speed_reward_on_success = 100.0
-                elif ee_speed < 0.05:
-                    speed_reward_on_success = 50.0
-                elif ee_speed < 0.1:
-                    speed_reward_on_success = 20.0
-                else:
-                    speed_reward_on_success = 0.0
-                reward += success_reward + speed_reward_on_success
-
-            info = {
-                "distance": distance_to_target,
-                "success": success,
-                "target_pos": self.target_pos.copy(),
-                "physics_backend": self.physics_backend,
-                "ee_speed": ee_speed,
-                "collision": collision_detected,
-                "collision_contacts": collision_contacts,
-                "curriculum_stage": self.curriculum_stage,
-                "episode_index": int(self.episode_count),
-                "reward_info": {
-                    "density_reward": density_reward,
-                    "distribution_reward": distribution_reward,
-                    "smoothness_reward": smoothness_reward,
-                    "joint_speed_penalty": joint_speed_penalty,
-                    "action_penalty": action_penalty,
-                    "collision_penalty": collision_penalty,
-                    "height_penalty": height_penalty,
-                    "vertical_reward": vertical_reward,
-                    "step_penalty": step_penalty,
-                },
-            }
-            return obs, float(reward), terminated, truncated, info
-
-        # ---- 以下是奖励项 ----
-        # 时间惩罚：鼓励更快完成任务。
+        # ---- zero-arm 原始奖励公式 ----
         reward -= float(self.config.step_penalty)
-        # 基础距离惩罚：-0.8 * sqrt(distance)。
-        reward += -float(self.config.base_distance_weight) * math.sqrt(max(distance, 1e-9))
 
-        # 距离改进奖励 / 退步惩罚。
+        improvement_reward = 0.0
         if self.min_distance is None:
             self.min_distance = distance
         elif distance < self.min_distance:
-            reward += float(self.config.improvement_gain) * float(self.min_distance - distance)
+            improvement_reward = float(self.config.improvement_gain) * float(self.min_distance - distance)
             self.min_distance = distance
         elif self.prev_distance is not None and distance > self.prev_distance:
-            reward -= float(self.config.regress_gain) * float(distance - self.prev_distance)
+            improvement_reward = -float(self.config.regress_gain) * float(distance - self.prev_distance)
+        reward += improvement_reward
         self.prev_distance = distance
 
-        # 阶段奖励：首次进入阈值区间时一次性加分。
+        base_distance_penalty = -float(self.config.base_distance_weight) * math.sqrt(max(distance, 1e-9))
+        reward += base_distance_penalty
+
+        phase_distance_reward = 0.0
         for thresh, phase_reward in zip(self.config.phase_thresholds, self.config.phase_rewards):
             if distance < float(thresh) and thresh not in self._phase_rewards_given:
-                reward += float(phase_reward)
+                phase_distance_reward += float(phase_reward)
                 self._phase_rewards_given.add(thresh)
+        reward += phase_distance_reward
 
-        # 速度惩罚：末端过快时扣分。
+        speed_penalty = 0.0
         if ee_speed > float(self.config.speed_penalty_threshold):
-            reward -= float(self.config.speed_penalty_value)
+            speed_penalty = -float(self.config.speed_penalty_value)
+            reward += speed_penalty
 
-        # 方向奖励：只奖励朝目标方向的运动（余弦 > 0）。
+        direction_reward = 0.0
         if ee_speed > 1e-6 and distance > 1e-9:
             to_target = relative_pos / (distance + 1e-6)
             movement_dir = ee_vel / (ee_speed + 1e-6)
             direction_cos = float(np.dot(to_target, movement_dir))
-            reward += max(0.0, direction_cos) ** 2 * float(self.config.direction_reward_gain)
+            direction_reward = max(0.0, direction_cos) ** 2 * float(self.config.direction_reward_gain)
+            reward += direction_reward
 
-        # 关节角速度变化惩罚：抑制抖动/抽动。
         joint_vel_change = np.abs(joint_vel - self.prev_joint_vel)
-        reward -= float(self.config.joint_vel_change_penalty_gain) * float(np.sum(joint_vel_change))
+        joint_velocity_change_penalty = -float(self.config.joint_vel_change_penalty_gain) * float(np.sum(joint_vel_change))
+        reward += joint_velocity_change_penalty
 
-        # 碰撞惩罚：按接触点数累计。
+        action_magnitude_penalty = -float(self.config.action_magnitude_penalty_gain) * float(np.mean(np.abs(torque_cmd)))
+        reward += action_magnitude_penalty
+
+        action_change_penalty = -float(self.config.action_change_penalty_gain) * float(np.mean(np.abs(torque_cmd - self.prev_torque)))
+        reward += action_change_penalty
+
+        idle_penalty = 0.0
+        if distance > float(self.config.idle_distance_threshold) and ee_speed < float(self.config.idle_speed_threshold):
+            idle_penalty = -float(self.config.idle_penalty_value)
+            reward += idle_penalty
+
         collision_detected = False
         collision_contacts = self._warp_ncon if self.physics_backend == "warp" else int(self.data.ncon)
+        collision_penalty = 0.0
         if collision_contacts > 0:
             collision_detected = True
-            reward -= float(self.config.collision_penalty_value) * float(collision_contacts)
+            collision_penalty = -float(self.config.collision_penalty_value) * float(collision_contacts)
+            reward += collision_penalty
 
-        # 终止判定（Gymnasium 新接口）：
-        # - terminated: 任务语义上的结束（成功/失败）。
-        # - truncated: 时间上限等外部截断。
         success = distance <= float(self.config.success_threshold)
         terminated = bool(success or collision_detected)
         truncated = self.step_count >= int(self.config.max_steps)
-        if success:
-            # 成功奖励 + 剩余步数奖励。
-            reward += float(self.config.success_bonus)
-            reward += float(self.config.success_remaining_step_gain) * float(self.config.max_steps - self.step_count)
-            # 成功时的速度奖励。
-            if ee_speed < 0.01:
-                reward += float(self.config.success_speed_bonus_very_slow)
-            elif ee_speed < 0.05:
-                reward += float(self.config.success_speed_bonus_slow)
-            elif ee_speed < 0.1:
-                reward += float(self.config.success_speed_bonus_medium)
-        elif collision_detected:
-            # 扣掉剩余步时间惩罚，避免策略学会“自杀式终止”。
-            reward += -float(self.config.step_penalty) * float(self.config.max_steps - self.step_count)
 
-        # 诊断信息：
-        # 训练算法不直接用这些字段，但你可以在日志里观测学习状态。
+        success_reward = 0.0
+        success_remaining_step_reward = 0.0
+        success_speed_reward = 0.0
+        collision_remaining_step_penalty = 0.0
+        if success:
+            success_reward = float(self.config.success_bonus)
+            success_remaining_step_reward = float(self.config.success_remaining_step_gain) * float(self.config.max_steps - self.step_count)
+            if ee_speed < 0.01:
+                success_speed_reward = float(self.config.success_speed_bonus_very_slow)
+            elif ee_speed < 0.05:
+                success_speed_reward = float(self.config.success_speed_bonus_slow)
+            elif ee_speed < 0.1:
+                success_speed_reward = float(self.config.success_speed_bonus_medium)
+            reward += success_reward + success_remaining_step_reward + success_speed_reward
+        elif collision_detected:
+            collision_remaining_step_penalty = -float(self.config.step_penalty) * float(self.config.max_steps - self.step_count)
+            reward += collision_remaining_step_penalty
+
         info = {
             "distance": distance,
             "success": success,
@@ -757,6 +653,23 @@ class UR5MujocoEnv(gym.Env):
             "collision_contacts": collision_contacts,
             "curriculum_stage": self.curriculum_stage,
             "episode_index": int(self.episode_count),
+            "reward_info": {
+                "step_penalty": -float(self.config.step_penalty),
+                "improvement_reward": improvement_reward,
+                "base_distance_penalty": base_distance_penalty,
+                "phase_distance_reward": phase_distance_reward,
+                "speed_penalty": speed_penalty,
+                "direction_reward": direction_reward,
+                "joint_velocity_change_penalty": joint_velocity_change_penalty,
+                "action_magnitude_penalty": action_magnitude_penalty,
+                "action_change_penalty": action_change_penalty,
+                "idle_penalty": idle_penalty,
+                "collision_penalty": collision_penalty,
+                "success_reward": success_reward,
+                "success_remaining_step_reward": success_remaining_step_reward,
+                "success_speed_reward": success_speed_reward,
+                "collision_remaining_step_penalty": collision_remaining_step_penalty,
+            },
         }
         return obs, float(reward), terminated, truncated, info
 
