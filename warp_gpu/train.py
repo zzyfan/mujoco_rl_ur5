@@ -15,6 +15,7 @@ from brax.io import model as brax_model
 from brax.training.agents.ppo import train as ppo
 from brax.training.agents.sac import train as sac
 from mujoco_playground._src import wrapper
+from tqdm.auto import tqdm
 
 if __package__ in (None, ""):
     ROOT = Path(__file__).resolve().parents[1]
@@ -193,13 +194,29 @@ def _run_train(args: TrainArgs) -> int:
     )
 
     times = [time.monotonic()]  # 用于统计编译和训练耗时。
+    progress_bar = tqdm(
+        total=max(int(args.num_timesteps), 1),
+        desc=f"{args.algo}:{args.robot}",
+        unit="step",
+        dynamic_ncols=True,
+    )
+    last_step = 0
 
     def progress(step: int, metrics) -> None:
+        nonlocal last_step
         times.append(time.monotonic())
+        current_step = max(int(step), 0)
+        delta = max(current_step - last_step, 0)
+        if delta:
+            progress_bar.update(delta)
+        last_step = current_step
+        postfix: dict[str, str] = {}
         if "eval/episode_reward" in metrics:
-            print(f"{step}: eval_reward={float(metrics['eval/episode_reward']):.3f}")  # 评估奖励用于观察当前策略整回合表现。
+            postfix["eval_reward"] = f"{float(metrics['eval/episode_reward']):.3f}"  # 评估奖励用于观察当前策略整回合表现。
         elif "episode/sum_reward" in metrics:
-            print(f"{step}: train_reward={float(metrics['episode/sum_reward']):.3f}")  # 训练奖励用于观察采样阶段的即时表现。
+            postfix["train_reward"] = f"{float(metrics['episode/sum_reward']):.3f}"  # 训练奖励用于观察采样阶段的即时表现。
+        if postfix:
+            progress_bar.set_postfix(postfix)
 
     if args.algo == "ppo":
         train_fn = functools.partial(  # PPO 通过 rollout 收集样本后执行多轮策略更新。
@@ -246,11 +263,14 @@ def _run_train(args: TrainArgs) -> int:
             checkpoint_logdir=str(ckpt_dir),
         )
 
-    make_inference_fn, params, _ = train_fn(
-        environment=env,
-        eval_env=eval_env,
-        progress_fn=progress,
-    )
+    try:
+        make_inference_fn, params, _ = train_fn(
+            environment=env,
+            eval_env=eval_env,
+            progress_fn=progress,
+        )
+    finally:
+        progress_bar.close()  # 无论训练正常结束还是异常退出，都主动关闭进度条。
     del make_inference_fn
     brax_model.save_params(str(run_dir / "final_policy.msgpack"), params)  # 训练结束后导出最终策略参数。
 
