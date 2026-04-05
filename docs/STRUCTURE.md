@@ -43,6 +43,13 @@
 - `assets/robotiq_cxy/`：UR5 CXY 模型资源
 - `assets/zero_arm/`：zero 机械臂与 zero+Robotiq 资源
 
+补充说明：
+
+- `assets/robotiq_cxy/lab_env.xml` 当前采用“视觉体和碰撞体分离”的写法
+- 视觉 `mesh` 只负责显示，不参与碰撞
+- `capsule / cylinder / box` 代理体负责训练时的碰撞检测
+- 这样可以减少复杂网格接触带来的误判和求解开销
+
 ## 输出目录约定
 
 `classic/` 会写入：

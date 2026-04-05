@@ -93,8 +93,8 @@ class MujocoEnvConfig:
     legacy_zero_ee_velocity: bool = False  # 是否按兼容公式读取末端速度特征。
 
     # 六个机械臂关节的扭矩范围。
-    torque_low: float = -15.0
-    torque_high: float = 15.0
+    torque_low: float = -10.0  # 扭矩下限；适度收紧动作范围，减少“快速接近后直接撞上去”的坏解。
+    torque_high: float = 10.0  # 扭矩上限；与下限对称，便于策略先学会可控推进。
     # 到点任务默认保持夹爪打开。
     fixed_gripper_ctrl: float = 0.0
     enable_gravity_motors: bool = True  # 是否向重力补偿电机写入固定控制量。
@@ -110,15 +110,15 @@ class MujocoEnvConfig:
 
     # 奖励项参数。
     step_penalty: float = 0.02  # 每步时间惩罚；过大容易让策略倾向“少动少错”。
-    base_distance_weight: float = 1.2  # 基础距离惩罚权重；增大后会更持续地驱动末端靠近目标。
-    improvement_gain: float = 120.0  # 距离变近奖励权重；放大后每一小步接近都会更明显地得到正反馈。
-    regress_gain: float = 60.0  # 距离变远惩罚权重；比接近奖励略小，避免策略因偶发抖动被过度打压。
-    speed_penalty_threshold: float = 0.35  # 末端速度超过该阈值时，判定为“过快”。
-    speed_penalty_value: float = 0.6  # 过快惩罚；增大后会抑制大幅度乱甩。
-    direction_reward_gain: float = 3.0  # 朝目标方向运动的奖励权重；增大后会更鼓励“有目标地移动”。
-    joint_vel_change_penalty_gain: float = 0.05  # 关节速度变化惩罚；增大后可抑制高频抖动。
-    action_magnitude_penalty_gain: float = 0.015  # 扭矩幅值惩罚；约束动作过大导致的乱动。
-    action_change_penalty_gain: float = 0.01  # 相邻两步动作变化惩罚；约束突兀切换。
+    base_distance_weight: float = 1.0  # 基础距离惩罚权重；略收小，让终止性大罚分不会过早淹没稠密信号。
+    improvement_gain: float = 100.0  # 距离变近奖励权重；保留持续逼近驱动力，但不再把“猛冲”奖励得过头。
+    regress_gain: float = 70.0  # 距离变远惩罚权重；略提高，帮助策略区分“靠近”和“擦边乱走”。
+    speed_penalty_threshold: float = 0.28  # 末端速度超过该阈值时，判定为“过快”。
+    speed_penalty_value: float = 0.8  # 过快惩罚；提高后更明确地压制接近目标前的过冲。
+    direction_reward_gain: float = 2.0  # 朝目标方向运动的奖励权重；收小后减少“只顾冲向目标”的碰撞驱动。
+    joint_vel_change_penalty_gain: float = 0.08  # 关节速度变化惩罚；提高后可抑制连续撞击前的关节急跳。
+    action_magnitude_penalty_gain: float = 0.02  # 扭矩幅值惩罚；提高后减少大扭矩直冲。
+    action_change_penalty_gain: float = 0.015  # 相邻两步动作变化惩罚；提高后减少突兀切换和擦撞。
     idle_distance_threshold: float = 0.08  # 当距离大于该值时，视作“还远离目标”。
     idle_speed_threshold: float = 0.015  # 当末端速度低于该值时，视作“几乎不动”。
     idle_penalty_value: float = 0.08  # 远离目标却几乎不动时的惩罚；用于打破 PPO 的静止策略。
@@ -129,7 +129,7 @@ class MujocoEnvConfig:
     success_speed_bonus_very_slow: float = 2000.0
     success_speed_bonus_slow: float = 1000.0
     success_speed_bonus_medium: float = 500.0
-    collision_penalty_value: float = 5000.0
+    collision_penalty_value: float = 8000.0  # 碰撞惩罚；提高后让“撞上去结束”更难成为局部最优。
     # 渲染相机参数。
     render_camera_name: str = "workbench_camera"
     viewer_lock_camera: bool = False
@@ -229,12 +229,15 @@ class UR5MujocoEnv(gym.Env):
         self.left_finger_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_follower_link")
         self.right_finger_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "right_follower_link")
         self.target_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "target_body_1")
+        self.robot_root_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "base_link")
         self.target_x_qpos_adr = self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "free_x_1")]
         self.target_y_qpos_adr = self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "free_y_1")]
         self.target_z_qpos_adr = self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "free_z_1")]
         self.target_ball_qpos_adr = self.model.jnt_qposadr[
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "free_ball_1")
         ]
+        self.robot_body_ids = self._collect_descendant_body_ids(self.robot_root_body_id)
+        self.ignored_contact_geom_ids = self._collect_ignored_contact_geom_ids()
 
         self.action_space = spaces.Box(
             low=np.full((6,), self.config.torque_low, dtype=np.float32),
@@ -399,6 +402,68 @@ class UR5MujocoEnv(gym.Env):
             right_pos = self.data.xpos[self.right_finger_body_id]
         center = 0.5 * (left_pos + right_pos)
         return center.copy().astype(np.float32)
+
+    def _collect_descendant_body_ids(self, root_body_id: int) -> set[int]:
+        """收集机器人根 body 及其所有子 body。
+
+        reach 任务里只关心“机器人与外部物体”的碰撞；
+        机器人内部接触不应直接算失败。
+        """
+        descendants: set[int] = set()
+        for body_id in range(self.model.nbody):
+            current = body_id
+            while current >= 0:
+                if current == root_body_id:
+                    descendants.add(body_id)
+                    break
+                parent = int(self.model.body_parentid[current])
+                if parent == current:
+                    break
+                current = parent
+        return descendants
+
+    def _collect_ignored_contact_geom_ids(self) -> set[int]:
+        """收集不应触发失败的 geom。
+
+        包括目标球、灯等纯可视化几何。
+        """
+        ignored_ids: set[int] = set()
+        for geom_id in range(self.model.ngeom):
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or ""
+            if name.startswith("target_") or name.startswith("light_"):
+                ignored_ids.add(geom_id)
+        return ignored_ids
+
+    def _is_hazardous_contact(self, geom1: int, geom2: int) -> bool:
+        """判断单个接触是否应算作训练失败。
+
+        当前策略：
+        1. 忽略目标球和灯等可视化几何；
+        2. 忽略机器人内部自接触；
+        3. 仅把机器人与外部可碰撞几何的接触视为危险碰撞。
+        """
+        if geom1 in self.ignored_contact_geom_ids or geom2 in self.ignored_contact_geom_ids:
+            return False
+        body1 = int(self.model.geom_bodyid[geom1])
+        body2 = int(self.model.geom_bodyid[geom2])
+        body1_is_robot = body1 in self.robot_body_ids
+        body2_is_robot = body2 in self.robot_body_ids
+        if body1_is_robot and body2_is_robot:
+            return False
+        return body1_is_robot or body2_is_robot
+
+    def _count_hazardous_contacts(self) -> tuple[int, int]:
+        """返回 (危险接触数, 原始接触数)。"""
+        if self.physics_backend == "warp":
+            raw_contacts = int(self._warp_ncon)
+            return raw_contacts, raw_contacts
+        raw_contacts = int(self.data.ncon)
+        hazardous_contacts = 0
+        for contact_id in range(raw_contacts):
+            contact = self.data.contact[contact_id]
+            if self._is_hazardous_contact(int(contact.geom1), int(contact.geom2)):
+                hazardous_contacts += 1
+        return hazardous_contacts, raw_contacts
 
     def _get_target_pos(self) -> np.ndarray:
         """读取目标体中心在世界坐标系下的位置。"""
@@ -614,7 +679,7 @@ class UR5MujocoEnv(gym.Env):
             reward += idle_penalty
 
         collision_detected = False
-        collision_contacts = self._warp_ncon if self.physics_backend == "warp" else int(self.data.ncon)
+        collision_contacts, raw_collision_contacts = self._count_hazardous_contacts()
         collision_penalty = 0.0
         if collision_contacts > 0:
             collision_detected = True
@@ -651,6 +716,7 @@ class UR5MujocoEnv(gym.Env):
             "ee_speed": ee_speed,
             "collision": collision_detected,
             "collision_contacts": collision_contacts,
+            "raw_collision_contacts": raw_collision_contacts,
             "curriculum_stage": self.curriculum_stage,
             "episode_index": int(self.episode_count),
             "reward_info": {
@@ -669,6 +735,7 @@ class UR5MujocoEnv(gym.Env):
                 "success_remaining_step_reward": success_remaining_step_reward,
                 "success_speed_reward": success_speed_reward,
                 "collision_remaining_step_penalty": collision_remaining_step_penalty,
+                "raw_collision_contacts": raw_collision_contacts,
             },
         }
         return obs, float(reward), terminated, truncated, info

@@ -67,6 +67,8 @@ python classic/test.py \
 - 支持 `best_model / final / interrupted`
 - 支持 `zero_robotiq` 机器人参数
 - 支持 `--legacy-zero-ee-velocity` 旧版速度读取开关
+- `ur5_cxy` 模型已将视觉 `mesh` 和代理碰撞体分离，减少复杂网格碰撞带来的训练噪声
+- 碰撞失败判定只统计机器人与外部危险几何的接触，不再把目标球、灯光或机器人内部自接触直接当作失败
 
 ### `warp_gpu/`
 
@@ -89,6 +91,7 @@ python classic/test.py \
 - `--num-eval-envs`：控制并行评估环境数量
 - `--naconmax / --naccdmax / --njmax`：控制 Warp 接触缓存和约束缓存大小
 - 运行前提：需要 `warp-lang`、`mujoco-warp` 和可用 CUDA 设备
+- `warp_gpu/env.py` 与 `classic/env.py` 现在使用同一套危险碰撞过滤逻辑：忽略目标球、灯光和机器人内部自接触
 
 示例：
 
@@ -107,6 +110,7 @@ python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --epi
 - `classic/`：按时间步输出最近窗口内的 `recent_reward / recent_ep_len / recent_distance / success_rate / collision_rate`，若开启评估还会附带 `eval_reward`
 - `warp_gpu/`：除了进度条，还会打印 Brax 回调返回的关键指标，例如 `eval_episode_reward / episode_sum_reward / distance / success / collision`
 - 训练结束时两条线都会额外打印最后一次可用回报
+- `collision_rate` 现在对应“过滤后的危险碰撞率”；若需要对照原始 MuJoCo 接触数，可查看 `info['raw_collision_contacts']`
 
 如果只想看新增日志，可以在服务器上配合：
 

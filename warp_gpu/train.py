@@ -188,21 +188,21 @@ def _build_env_config(args: TrainArgs):
     cfg.fixed_target_z = args.fixed_target_z  # 固定目标点 z。
     # 与 classic 保持同一套奖励结构，并按算法套不同系数。
     if args.algo == "ppo":
-        cfg.improvement_gain = 220.0  # 更强的接近奖励，帮助 PPO 尽快建立目标导向行为。
-        cfg.regress_gain = 85.0  # 退步惩罚小于接近奖励，给探索保留空间。
-        cfg.direction_reward_gain = 7.0  # 更强调朝目标方向的移动，减少平滑但偏题的运动。
-        cfg.speed_penalty_value = 0.12  # 放松速度惩罚，避免 PPO 被压成缓慢试探。
-        cfg.action_magnitude_penalty_gain = 0.0008  # 大幅放松动作幅值惩罚，让 PPO 更敢动。
-        cfg.action_change_penalty_gain = 0.0005  # 放松动作切换惩罚，让 PPO 更愿意修正轨迹。
-        cfg.idle_penalty_value = 0.6  # 明确惩罚远离目标却几乎不动的状态。
+        cfg.improvement_gain = 160.0  # PPO 保留较强逼近奖励，但避免因为奖励过强直接冲向目标发生碰撞。
+        cfg.regress_gain = 80.0  # 提高退步惩罚，帮助 PPO 更快放弃碰撞型轨迹。
+        cfg.direction_reward_gain = 4.0  # 方向奖励收小到中高水平，减少“只顾朝目标冲”的局部最优。
+        cfg.speed_penalty_value = 0.35  # 提高超速惩罚，让 PPO 在接近目标前更愿意减速。
+        cfg.action_magnitude_penalty_gain = 0.003  # 保留探索，同时抑制过大的扭矩输出。
+        cfg.action_change_penalty_gain = 0.002  # 控制动作切换幅度，减少高噪声接触。
+        cfg.idle_penalty_value = 0.35  # 继续惩罚发呆，但不再逼出过度探索。
     else:
-        cfg.improvement_gain = 150.0  # SAC 仍以持续接近目标为主驱动力。
-        cfg.regress_gain = 70.0  # 中等偏上的退步惩罚，抑制目标附近来回游走。
-        cfg.direction_reward_gain = 4.5  # 强化朝目标运动的奖励，减少“有效速度但无效方向”。
-        cfg.speed_penalty_value = 0.45  # 保留一定超速约束，避免过冲。
-        cfg.action_magnitude_penalty_gain = 0.006  # 中等动作幅值惩罚，压制大动作乱甩。
-        cfg.action_change_penalty_gain = 0.004  # 中等动作切换惩罚，减少高频抖动。
-        cfg.idle_penalty_value = 0.15  # 中等静止惩罚，避免 SAC 学成发呆策略。
+        cfg.improvement_gain = 130.0  # SAC 仍以逼近为主，但减弱对“猛冲”的偏好。
+        cfg.regress_gain = 75.0  # 略加强退步惩罚，帮助值函数更快区分偏离和逼近。
+        cfg.direction_reward_gain = 3.0  # 降低方向奖励主导性，减少只管朝目标直冲。
+        cfg.speed_penalty_value = 0.7  # 加强超速惩罚，压制接近目标时的过冲碰撞。
+        cfg.action_magnitude_penalty_gain = 0.01  # 提高动作幅值惩罚，减少大扭矩碰撞。
+        cfg.action_change_penalty_gain = 0.007  # 提高动作切换惩罚，减少目标附近急修正。
+        cfg.idle_penalty_value = 0.12  # 保留轻度静止惩罚，避免又退回发呆策略。
     return cfg
 
 

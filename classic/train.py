@@ -318,29 +318,29 @@ def _make_env(args: TrainArgs, render_mode: str | None = None):
     # 三种算法共用同一套奖励结构，但奖励系数按算法做适配：
     # PPO 更怕学成“站着不动”，SAC 更容易乱甩，TD3 介于两者之间。
     if args.algo == "ppo":
-        cfg.improvement_gain = 220.0  # PPO 更依赖稠密正反馈，把“每一点接近”都做得更显著。
-        cfg.regress_gain = 85.0  # 保留退步惩罚，但明显小于接近奖励，避免策略因探索被过早压回去。
-        cfg.direction_reward_gain = 7.0  # 强化目标方向信号，减少“速度合适但没朝目标走”的无效运动。
-        cfg.speed_penalty_value = 0.12  # 进一步放松速度惩罚，让 PPO 不会因为想动快一点就被压住。
-        cfg.action_magnitude_penalty_gain = 0.0008  # 大幅降低动作幅值惩罚，允许 PPO 迈出更明显的动作。
-        cfg.action_change_penalty_gain = 0.0005  # 降低动作切换惩罚，允许前期探索时动作变化更积极。
-        cfg.idle_penalty_value = 0.6  # 远离目标却几乎不动时给更明确的负反馈，逼策略摆脱“慢挪/发呆”。
+        cfg.improvement_gain = 160.0  # PPO 仍需要较强稠密正反馈，但收小后不再把“直冲目标”奖励得过激。
+        cfg.regress_gain = 80.0  # 保留明显退步惩罚，让 PPO 更快放弃擦边碰撞轨迹。
+        cfg.direction_reward_gain = 4.0  # 方向奖励保留为主信号，但不再主导策略一味加速前冲。
+        cfg.speed_penalty_value = 0.35  # 提高超速约束，帮助 PPO 在接近目标前学会减速。
+        cfg.action_magnitude_penalty_gain = 0.003  # 保持探索空间，同时显式约束过大的扭矩输出。
+        cfg.action_change_penalty_gain = 0.002  # 放松但不取消动作切换约束，避免高噪声碰撞策略。
+        cfg.idle_penalty_value = 0.35  # 仍然惩罚发呆，但不再把 PPO 推成“必须大动作”的发散探索。
     elif args.algo == "sac":
-        cfg.improvement_gain = 150.0  # 强化持续接近目标的主奖励，减少“平滑但偏题”的行为。
-        cfg.regress_gain = 70.0  # 退步惩罚中等偏上，提醒 SAC 别在目标附近来回游走。
-        cfg.direction_reward_gain = 4.5  # 比之前更强调朝目标的运动方向，让探索更有任务性。
-        cfg.speed_penalty_value = 0.45  # 适度保留超速约束，避免过冲但不过度压制前进速度。
-        cfg.action_magnitude_penalty_gain = 0.006  # 放松动作幅值惩罚，减少“有速度但没推进”的软性限制。
-        cfg.action_change_penalty_gain = 0.004  # 放松动作切换惩罚，让 SAC 能更积极修正轨迹。
-        cfg.idle_penalty_value = 0.15  # 只给中等静止惩罚，避免过度逼迫探索。
+        cfg.improvement_gain = 130.0  # SAC 仍以逼近为主，但收小后减少 critic 把“猛冲”视为高价值。
+        cfg.regress_gain = 75.0  # 稍提高退步惩罚，帮助 SAC 更快淘汰回合末大偏移轨迹。
+        cfg.direction_reward_gain = 3.0  # 降低方向奖励主导性，避免只要朝着目标就不顾接触风险。
+        cfg.speed_penalty_value = 0.7  # 加强超速惩罚，抑制接近目标阶段的过冲碰撞。
+        cfg.action_magnitude_penalty_gain = 0.01  # 提高动作幅值惩罚，减少大扭矩直线撞击。
+        cfg.action_change_penalty_gain = 0.007  # 提高动作切换惩罚，减少临近目标时的急修正撞击。
+        cfg.idle_penalty_value = 0.12  # 保留轻度静止惩罚，避免为了防撞又退回到发呆策略。
     else:
-        cfg.improvement_gain = 170.0  # TD3 也更强调持续逼近目标，降低“稳定乱动”的吸引力。
-        cfg.regress_gain = 80.0  # 退步惩罚保持中高，帮助 critic 区分好坏轨迹。
-        cfg.direction_reward_gain = 3.5  # 适当提高方向奖励，让 TD3 轨迹更直接。
-        cfg.speed_penalty_value = 0.3  # 放松速度惩罚，避免 TD3 前进过于畏手畏脚。
-        cfg.action_magnitude_penalty_gain = 0.0045  # 降低动作幅值惩罚，让 TD3 更敢输出推进扭矩。
-        cfg.action_change_penalty_gain = 0.003  # 降低动作切换惩罚，减少“平稳但不推进”的问题。
-        cfg.idle_penalty_value = 0.2  # 中等静止惩罚，避免学成“缓慢保守但不接近”的策略。
+        cfg.improvement_gain = 140.0  # TD3 保持较强逼近驱动，但比 PPO 更克制。
+        cfg.regress_gain = 80.0  # 退步惩罚维持中高，帮助 value 估计更快远离发散轨迹。
+        cfg.direction_reward_gain = 2.8  # 收小方向奖励，减少 TD3 走成“目标方向硬冲”的局部最优。
+        cfg.speed_penalty_value = 0.55  # 加强速度约束，让 TD3 更容易学会靠近时减速。
+        cfg.action_magnitude_penalty_gain = 0.008  # 提高扭矩约束，降低大动作碰撞。
+        cfg.action_change_penalty_gain = 0.006  # 提高动作切换惩罚，减少目标附近抖动式碰撞。
+        cfg.idle_penalty_value = 0.15  # 保留轻中度静止惩罚，兼顾推进和稳定。
     if args.robot == "zero_robotiq":  # zero 机械臂 + Robotiq 夹爪配置分支。
         cfg.model_xml = "assets/zero_arm/zero_with_robotiq_reach.xml"  # 切换到 zero+夹爪模型。
         cfg.home_pose_mode = "direct6"  # zero 机械臂采用直接六关节初始角。
@@ -653,7 +653,7 @@ def _build_model(args: TrainArgs, env, device: str):
             vf=[512, 512, 256],  # 价值网络层宽。
         ),
         activation_fn=nn.ReLU,  # 激活函数。
-        log_std_init=0.4,  # 提高初始动作方差，让 PPO 一开始就敢做更大幅度的连续控制探索。
+        log_std_init=0.0,  # 把初始动作方差收回到中等水平，避免 PPO 早期直接发散成高噪声碰撞策略。
     )
     return PPO(  # 返回 PPO 模型实例。
         "MlpPolicy",  # MLP 策略。
@@ -661,12 +661,12 @@ def _build_model(args: TrainArgs, env, device: str):
         verbose=1,  # 输出日志。
         seed=args.seed,  # 随机种子。
         device=device,  # 训练设备。
-        learning_rate=5e-4,  # 提高学习率，让 PPO 在前期更快形成有效探索方向。
+        learning_rate=3e-4,  # 学习率回到更稳的量级，减少策略在前期因为更新过猛而发散。
         n_steps=512,  # rollout 长度；收短一点能让 PPO 更快更新，减少前期长时间小幅试探。
         batch_size=args.batch_size,  # batch 大小。
         gamma=0.99,  # 折扣因子。
         gae_lambda=0.95,  # GAE 参数。
-        ent_coef=0.02,  # 提高熵奖励，鼓励 PPO 保持探索而不是过早收缩成小动作策略。
+        ent_coef=0.005,  # 保留探索，但避免熵过高把策略长期维持在高噪声撞击状态。
         policy_kwargs=policy_kwargs,  # 网络配置。
     )
 

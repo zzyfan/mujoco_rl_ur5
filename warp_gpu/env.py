@@ -44,8 +44,8 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         naccdmax=128,  # CCD 接触缓存控制连续碰撞检测的临时接触数量。
         njmax=64,
         success_threshold=0.01,
-        torque_low=-15.0,
-        torque_high=15.0,
+        torque_low=-10.0,
+        torque_high=10.0,
         fixed_gripper_ctrl=0.0,
         enable_gravity_motors=True,
         gravity_ctrl=-1.0,
@@ -66,15 +66,15 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         fixed_target_y=None,
         fixed_target_z=None,
         step_penalty=0.02,
-        base_distance_weight=1.2,
-        improvement_gain=120.0,
-        regress_gain=60.0,
-        speed_penalty_threshold=0.35,
-        speed_penalty_value=0.6,
-        direction_reward_gain=3.0,
-        joint_vel_change_penalty_gain=0.05,
-        action_magnitude_penalty_gain=0.015,
-        action_change_penalty_gain=0.01,
+        base_distance_weight=1.0,
+        improvement_gain=100.0,
+        regress_gain=70.0,
+        speed_penalty_threshold=0.28,
+        speed_penalty_value=0.8,
+        direction_reward_gain=2.0,
+        joint_vel_change_penalty_gain=0.08,
+        action_magnitude_penalty_gain=0.02,
+        action_change_penalty_gain=0.015,
         idle_distance_threshold=0.08,
         idle_speed_threshold=0.015,
         idle_penalty_value=0.08,
@@ -85,7 +85,7 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         success_speed_bonus_very_slow=2000.0,
         success_speed_bonus_slow=1000.0,
         success_speed_bonus_medium=500.0,
-        collision_penalty_value=5000.0,
+        collision_penalty_value=8000.0,
     )
     if robot == "zero_robotiq":
         cfg.model_xml = "assets/zero_arm/zero_with_robotiq_reach.xml"
@@ -141,6 +141,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         self._left_finger_body_id = self.mj_model.body("left_follower_link").id
         self._right_finger_body_id = self.mj_model.body("right_follower_link").id
         self._target_body_id = self.mj_model.body("target_body_1").id  # 目标点位置从这个 body 的 `xpos` 读取。
+        self._robot_root_body_id = self.mj_model.body("base_link").id
 
         self._target_x_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_x_1").id]
         self._target_y_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_y_1").id]
@@ -156,6 +157,33 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         self._phase_thresholds = jp.asarray(self._config.phase_thresholds, dtype=jp.float32)
         self._phase_rewards = jp.asarray(self._config.phase_rewards, dtype=jp.float32)
         self._identity_quat = jp.asarray([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
+        self._geom_body_ids = jp.asarray(np.asarray(self.mj_model.geom_bodyid, dtype=np.int32))
+        self._robot_body_mask = jp.asarray(self._build_robot_body_mask(), dtype=jp.bool_)
+        self._ignored_contact_geom_mask = jp.asarray(self._build_ignored_contact_geom_mask(), dtype=jp.bool_)
+
+    def _build_robot_body_mask(self) -> np.ndarray:
+        """构建机器人 body 掩码，用于忽略机器人内部自接触。"""
+        mask = np.zeros(self.mj_model.nbody, dtype=bool)
+        for body_id in range(self.mj_model.nbody):
+            current = body_id
+            while current >= 0:
+                if current == self._robot_root_body_id:
+                    mask[body_id] = True
+                    break
+                parent = int(self.mj_model.body_parentid[current])
+                if parent == current:
+                    break
+                current = parent
+        return mask
+
+    def _build_ignored_contact_geom_mask(self) -> np.ndarray:
+        """构建应忽略的可视化 geom 掩码。"""
+        mask = np.zeros(self.mj_model.ngeom, dtype=bool)
+        for geom_id in range(self.mj_model.ngeom):
+            name = self.mj_model.geom(geom_id).name or ""
+            if name.startswith("target_") or name.startswith("light_"):
+                mask[geom_id] = True
+        return mask
 
     def _home_arm_pose(self) -> jax.Array:
         q1 = jp.asarray(self._config.home_joint1, dtype=jp.float32)
@@ -254,12 +282,27 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         joint_vel = data.qvel[self._arm_qvel_adr]
         return jp.concatenate([relative_pos, joint_pos, joint_vel, prev_torque, ee_vel]).astype(jp.float32)  # 观测向量由相对位置、关节状态和速度组成。
 
-    def _contact_count(self, data: mjx.Data) -> jax.Array:
-        """Count active contacts in `mjx.Data`."""
-        efc_address = getattr(getattr(data, "contact", None), "efc_address", None)
+    def _contact_count(self, data: mjx.Data) -> tuple[jax.Array, jax.Array]:
+        """返回 (危险接触数, 原始有效接触数)。"""
+        contact = getattr(data, "contact", None)
+        efc_address = getattr(contact, "efc_address", None)
         if efc_address is None:
-            return jp.asarray(0.0, dtype=jp.float32)
-        return jp.sum(jp.asarray(efc_address) >= 0).astype(jp.float32)
+            zero = jp.asarray(0.0, dtype=jp.float32)
+            return zero, zero
+        active_mask = jp.asarray(efc_address) >= 0
+        raw_contacts = jp.sum(active_mask).astype(jp.float32)
+
+        geom1 = jp.asarray(contact.geom1)
+        geom2 = jp.asarray(contact.geom2)
+        ignored = self._ignored_contact_geom_mask[geom1] | self._ignored_contact_geom_mask[geom2]
+        body1 = self._geom_body_ids[geom1]
+        body2 = self._geom_body_ids[geom2]
+        body1_is_robot = self._robot_body_mask[body1]
+        body2_is_robot = self._robot_body_mask[body2]
+        internal_robot_contact = body1_is_robot & body2_is_robot
+        hazardous_mask = active_mask & (~ignored) & (~internal_robot_contact) & (body1_is_robot | body2_is_robot)
+        hazardous_contacts = jp.sum(hazardous_mask).astype(jp.float32)
+        return hazardous_contacts, raw_contacts
 
     def reset(self, rng: jax.Array) -> mjx_env.State:
         rng, target_rng = jax.random.split(rng)
@@ -361,7 +404,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             0.0,
         )
 
-        collision_contacts = self._contact_count(data)  # 碰撞惩罚按有效接触点数累计。
+        collision_contacts, raw_collision_contacts = self._contact_count(data)  # 只统计机器人与外部危险几何的接触。
         collision = collision_contacts > 0
         reward -= self._config.collision_penalty_value * collision_contacts
 
@@ -395,6 +438,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             "ee_speed": ee_speed,
             "success": success.astype(jp.float32),
             "collision": collision.astype(jp.float32),
+            "raw_collision_contacts": raw_collision_contacts,
         }
         info = {
             **state.info,  # 保留包装器写入的统计键，避免 JAX 扫描时字典结构变化。
