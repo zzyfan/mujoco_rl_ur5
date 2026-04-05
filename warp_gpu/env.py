@@ -330,6 +330,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             "ee_speed": jp.asarray(0.0, dtype=jp.float32),
             "success": jp.asarray(0.0, dtype=jp.float32),
             "collision": jp.asarray(0.0, dtype=jp.float32),
+            "raw_collision_contacts": jp.asarray(0.0, dtype=jp.float32),
         }
         info = {
             "rng": rng,
