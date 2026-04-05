@@ -3,7 +3,7 @@
 纯 MuJoCo 机械臂强化学习项目，当前包含两条训练线：
 
 - `classic/`：主训练线，基于 Gymnasium + Stable-Baselines3
-- `mjx/`：MuJoCo Playground / Brax 训练入口
+- `warp_gpu/`：Warp GPU + MuJoCo Playground + Brax 训练入口
 
 当前仓库支持两套机械臂模型：
 
@@ -68,32 +68,32 @@ python classic/test.py \
 - 支持 `zero_robotiq` 机器人参数
 - 支持 `--legacy-zero-ee-velocity` 旧版速度读取开关
 
-### `mjx/`
+### `warp_gpu/`
 
-这条线提供 MuJoCo Playground / Brax 训练入口。
+这条线提供纯 GPU 的 Warp 训练入口。
 
-- 环境：`mjx/reach_env.py`
-- 训练入口：`mjx/train.py`
-- 自检入口：`mjx/benchmark.py`
-- 后端检测：`mjx/backend.py`
+- 环境：`warp_gpu/env.py`
+- 训练入口：`warp_gpu/train.py`
+- 自检入口：`warp_gpu/smoke.py`
+- 运行时检测：`warp_gpu/runtime.py`
 - 算法：`PPO / SAC`
-- 物理后端：`mjx(jax) / warp`
+- 物理后端：`warp`
 
 参数说明：
 
 - `--algo ppo`：调用 `brax.training.agents.ppo`
 - `--algo sac`：调用 `brax.training.agents.sac`
-- `--algo td3`：当前不会启动训练，因为本地 Brax 版本没有 `td3` 训练入口
-- `--impl mjx`：映射到 MuJoCo 的 `jax` 实现
 - `--num-envs`：控制并行训练环境数量
 - `--num-eval-envs`：控制并行评估环境数量
+- `--naconmax / --naccdmax / --njmax`：控制 Warp 接触缓存和约束缓存大小
+- 运行前提：需要 `warp-lang`、`mujoco-warp` 和可用 CUDA 设备
 
 示例：
 
 ```bash
-python -m mjx.benchmark --robot ur5_cxy --impl mjx --steps 2
-python -m mjx.train --algo ppo --robot ur5_cxy --impl warp --num-envs 256
-python -m mjx.train --algo sac --robot ur5_cxy --impl mjx --num-envs 16 --num-eval-envs 16
+python -m warp_gpu.smoke --robot ur5_cxy --steps 2
+python -m warp_gpu.train --algo ppo --robot ur5_cxy --num-envs 256
+python -m warp_gpu.train --algo sac --robot ur5_cxy --num-envs 16 --num-eval-envs 16
 ```
 
 ## 常用命令
@@ -166,10 +166,10 @@ logs/classic/{algo}/{robot}/{run_name}/
 - `best_model/`：评估回调保存
 - 旧版输出会在运行时自动同步到 `classic` 分层目录
 
-`mjx/` 默认输出：
+`warp_gpu/` 默认输出：
 
 ```text
-models/mjx/{run_name}/
+models/warp_gpu/{algo}/{robot}/{run_name}/
   checkpoints/
   config.json
   final_policy.msgpack
@@ -178,7 +178,7 @@ models/mjx/{run_name}/
 说明：
 
 - `checkpoints/`：Brax 训练过程中保存的阶段参数
-- `config.json`：训练参数、环境参数和后端信息
+- `config.json`：训练参数、环境参数和 Warp 运行时信息
 - `final_policy.msgpack`：训练结束时导出的最终策略参数
 
 ## 推荐工作流
@@ -193,4 +193,4 @@ models/mjx/{run_name}/
 
 更精简的结构说明见 [docs/STRUCTURE.md](docs/STRUCTURE.md)。
 
-项目交付笔记见 `PROJECT_STATUS.ipynb`。
+项目交付笔记见 `PROJECT_STATUS.ipynb`，代码学习笔记见 `CODE_LEARNING_NOTES.ipynb`。

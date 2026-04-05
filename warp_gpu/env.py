@@ -1,4 +1,4 @@
-"""MJX 版 UR5/zero reach 任务。"""
+"""Warp GPU reach environment for UR5 and zero_robotiq."""
 
 from __future__ import annotations
 
@@ -26,20 +26,11 @@ _ARM_ACTUATOR_NAMES = (
 )
 _GRIPPER_ACTUATOR_NAMES = ("close_1", "close_2")
 _GRAVITY_ACTUATOR_NAMES = ("gravity_1", "gravity_2", "gravity_3", "gravity_4")
-
-
-def normalize_impl_name(impl: str) -> str:
-    """把用户习惯里的 `mjx` 映射到 MuJoCo 当前的 `jax` 实现名。"""
-    lowered = str(impl or "warp").strip().lower()
-    if lowered == "mjx":
-        return "jax"
-    if lowered not in {"warp", "jax", "c", "cpp"}:
-        raise ValueError(f"不支持的 MJX impl: {impl}")
-    return lowered
+_WARP_IMPL = "warp"
 
 
 def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
-    """生成 reach 环境配置。"""
+    """Build the default environment configuration."""
     cfg = config_dict.create(
         robot=robot,
         model_xml="assets/robotiq_cxy/lab_env.xml",
@@ -48,10 +39,10 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         episode_length=3000,
         action_repeat=1,
         frame_skip=1,
-        impl="warp",
-        naconmax=4096,  # 机械臂 + 夹爪的接触比 Cartpole 重得多，需要显式给接触缓存。
-        naccdmax=4096,
-        njmax=128,
+        impl=_WARP_IMPL,  # MuJoCo Warp 通过这个字段选择底层物理实现。
+        naconmax=128,  # 接触缓存上限会参与静态编译，过大时会明显拖慢首次启动。
+        naccdmax=128,  # CCD 接触缓存控制连续碰撞检测的临时接触数量。
+        njmax=64,
         success_threshold=0.01,
         torque_low=-15.0,
         torque_high=15.0,
@@ -93,7 +84,7 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
     )
     if robot == "zero_robotiq":
         cfg.model_xml = "assets/zero_arm/zero_with_robotiq_reach.xml"
-        cfg.home_pose_mode = "direct6"  # zero 机械臂没有 UR5 那套 wrist 耦合初始姿态。
+        cfg.home_pose_mode = "direct6"  # `direct6` 表示 6 个关节角按配置值直接写入 `qpos`。
         cfg.home_joint1 = 0.0
         cfg.home_joint2 = -0.85
         cfg.home_joint3 = 1.35
@@ -109,8 +100,8 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
     return cfg
 
 
-class UR5ReachMjxEnv(mjx_env.MjxEnv):
-    """按 MuJoCo Playground 结构实现的 UR5/zero reach 环境。"""
+class UR5ReachWarpEnv(mjx_env.MjxEnv):
+    """Reach task implemented with MuJoCo Playground and Warp."""
 
     def __init__(
         self,
@@ -120,17 +111,17 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
         base_config = config.copy_and_resolve_references() if config is not None else default_config()
         if config_overrides:
             base_config.update_from_flattened_dict(config_overrides)
-        base_config.impl = normalize_impl_name(base_config.impl)
+        base_config.impl = _WARP_IMPL
         base_config.frame_skip = max(int(base_config.frame_skip), 1)
-        base_config.ctrl_dt = float(base_config.sim_dt) * int(base_config.frame_skip)  # 让 MJX 的 dt 语义和 classic 一致。
+        base_config.ctrl_dt = float(base_config.sim_dt) * int(base_config.frame_skip)  # `ctrl_dt` 控制策略动作的生效周期。
         super().__init__(base_config, None)
 
         xml_path = (_ROOT / self._config.model_xml).resolve()
         if not xml_path.exists():
-            raise FileNotFoundError(f"未找到 MJX reach 模型文件: {xml_path}")
+            raise FileNotFoundError(f"未找到 Warp GPU 环境模型文件: {xml_path}")
         self._xml_path = str(xml_path)
         self._mj_model = mujoco.MjModel.from_xml_path(self._xml_path)
-        self._mj_model.opt.timestep = self.sim_dt  # MJX 里直接把 XML timestep 设成训练使用的 sim_dt。
+        self._mj_model.opt.timestep = self.sim_dt  # 训练时统一使用配置里的物理步长。
         self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
         self._post_init()
 
@@ -144,7 +135,7 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
 
         self._left_finger_body_id = self.mj_model.body("left_follower_link").id
         self._right_finger_body_id = self.mj_model.body("right_follower_link").id
-        self._target_body_id = self.mj_model.body("target_body_1").id  # classic 也是用这个 body 作为 reach 目标。
+        self._target_body_id = self.mj_model.body("target_body_1").id  # 目标点位置从这个 body 的 `xpos` 读取。
 
         self._target_x_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_x_1").id]
         self._target_y_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_y_1").id]
@@ -155,7 +146,7 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
         mujoco.mj_forward(self.mj_model, data)
         self._home_qpos = jp.asarray(data.qpos.copy())
         self._home_qvel = jp.asarray(data.qvel.copy())
-        self._zero_action = jp.zeros(6, dtype=jp.float32)  # 策略只管 6 个关节扭矩，夹爪和重力电机由环境补齐。
+        self._zero_action = jp.zeros(6, dtype=jp.float32)  # 策略只输出 6 个关节的扭矩命令。
         self._zero_ee_vel = jp.zeros(3, dtype=jp.float32)
         self._phase_thresholds = jp.asarray(self._config.phase_thresholds, dtype=jp.float32)
         self._phase_rewards = jp.asarray(self._config.phase_rewards, dtype=jp.float32)
@@ -222,7 +213,7 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
     def _build_reset_qpos(self, target_pos: jax.Array) -> jax.Array:
         qpos = self._home_qpos
         qpos = qpos.at[self._arm_qpos_adr].set(self._home_arm_pose())
-        qpos = qpos.at[6:14].set(0.0)  # reach 任务里夹爪始终张开，减少抓取接触带来的额外变量。
+        qpos = qpos.at[6:14].set(0.0)  # 把夹爪展开，避免抓取状态影响到点任务。
         qpos = qpos.at[self._target_x_qpos_adr].set(target_pos[0])
         qpos = qpos.at[self._target_y_qpos_adr].set(target_pos[1])
         qpos = qpos.at[self._target_z_qpos_adr].set(target_pos[2])
@@ -231,7 +222,7 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
 
     def _compose_ctrl(self, arm_action: jax.Array) -> jax.Array:
         ctrl = jp.zeros(self.mj_model.nu, dtype=jp.float32)
-        ctrl = ctrl.at[self._arm_actuator_ids].set(arm_action)  # 前 6 维策略动作映射到真实 12 维 ctrl 里的 arm 部分。
+        ctrl = ctrl.at[self._arm_actuator_ids].set(arm_action)  # 把 6 维策略动作写入机械臂电机控制槽位。
         ctrl = ctrl.at[self._gripper_actuator_ids].set(self._config.fixed_gripper_ctrl)
         if self._config.enable_gravity_motors:
             ctrl = ctrl.at[self._gravity_actuator_ids].set(self._config.gravity_ctrl)
@@ -240,7 +231,7 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
     def _get_ee_pos(self, data: mjx.Data) -> jax.Array:
         left_pos = data.xpos[self._left_finger_body_id]
         right_pos = data.xpos[self._right_finger_body_id]
-        return 0.5 * (left_pos + right_pos)  # 和 classic 一样，末端位置取两指中心点而不是 wrist。
+        return 0.5 * (left_pos + right_pos)  # 末端位置定义为两指尖中心点。
 
     def _get_target_pos(self, data: mjx.Data) -> jax.Array:
         return data.xpos[self._target_body_id]
@@ -256,7 +247,14 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
         relative_pos = target_pos - ee_pos
         joint_pos = data.qpos[self._arm_qpos_adr]
         joint_vel = data.qvel[self._arm_qvel_adr]
-        return jp.concatenate([relative_pos, joint_pos, joint_vel, prev_torque, ee_vel]).astype(jp.float32)  # 24 维观测向量。
+        return jp.concatenate([relative_pos, joint_pos, joint_vel, prev_torque, ee_vel]).astype(jp.float32)  # 观测向量由相对位置、关节状态和速度组成。
+
+    def _contact_count(self, data: mjx.Data) -> jax.Array:
+        """Count active contacts in `mjx.Data`."""
+        efc_address = getattr(getattr(data, "contact", None), "efc_address", None)
+        if efc_address is None:
+            return jp.asarray(0.0, dtype=jp.float32)
+        return jp.sum(jp.asarray(efc_address) >= 0).astype(jp.float32)
 
     def reset(self, rng: jax.Array) -> mjx_env.State:
         rng, target_rng = jax.random.split(rng)
@@ -274,7 +272,7 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
             naccdmax=self._config.naccdmax,
             njmax=self._config.njmax,
         )
-        data = mjx.forward(self.mjx_model, data)  # reset 后先 forward 一次，保证 xpos/qvel 等派生量可读。
+        data = mjx.forward(self.mjx_model, data)  # `forward` 会刷新 `xpos`、接触和速度等派生量。
 
         ee_pos = self._get_ee_pos(data)
         distance = jp.linalg.norm(self._get_target_pos(data) - ee_pos)
@@ -291,7 +289,7 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
             "prev_joint_vel": jp.zeros(6, dtype=jp.float32),
             "prev_distance": distance,
             "min_distance": distance,
-            "phase_hits": jp.zeros(len(self._config.phase_thresholds), dtype=jp.bool_),  # MJX 里用 info 显式保存阶段奖励命中状态。
+            "phase_hits": jp.zeros(len(self._config.phase_thresholds), dtype=jp.bool_),  # 用布尔向量记录阶段奖励是否已经发放。
             "prev_ee_pos": ee_pos,
             "task_step": jp.asarray(0, dtype=jp.int32),
         }
@@ -305,13 +303,13 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
         )
 
     def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
-        torque_cmd = jp.clip(action, self._config.torque_low, self._config.torque_high).astype(jp.float32)  # 先做和 classic 一样的扭矩限幅。
+        torque_cmd = jp.clip(action, self._config.torque_low, self._config.torque_high).astype(jp.float32)  # 先按电机扭矩范围裁剪动作。
         ctrl = self._compose_ctrl(torque_cmd)
         data = mjx_env.step(self.mjx_model, state.data, ctrl, self.n_substeps)
 
         task_step = state.info["task_step"] + 1
         ee_pos = self._get_ee_pos(data)
-        ee_vel = (ee_pos - state.info["prev_ee_pos"]) / jp.maximum(jp.asarray(self.dt, dtype=jp.float32), 1e-6)  # 中心点有限差分速度。
+        ee_vel = (ee_pos - state.info["prev_ee_pos"]) / jp.maximum(jp.asarray(self.dt, dtype=jp.float32), 1e-6)  # 末端速度由相邻两步位置差分得到。
         obs = self._get_obs(data, state.info["prev_torque"], ee_vel)
         relative_pos = obs[0:3]
         joint_vel = obs[9:15]
@@ -336,7 +334,7 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
         next_min_distance = jp.minimum(state.info["min_distance"], distance)
 
         phase_hits = state.info["phase_hits"]
-        new_phase_hits = jp.logical_and(distance < self._phase_thresholds, jp.logical_not(phase_hits))  # 阶段奖励只发一次，避免卡阈值刷分。
+        new_phase_hits = jp.logical_and(distance < self._phase_thresholds, jp.logical_not(phase_hits))  # 每个距离阈值只触发一次奖励。
         reward += jp.sum(new_phase_hits.astype(jp.float32) * self._phase_rewards)
         phase_hits = jp.logical_or(phase_hits, new_phase_hits)
 
@@ -350,7 +348,7 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
         joint_vel_change = jp.abs(joint_vel - state.info["prev_joint_vel"])
         reward -= self._config.joint_vel_change_penalty_gain * jp.sum(joint_vel_change)
 
-        collision_contacts = jp.asarray(data.ncon, dtype=jp.float32)  # 接触点数。
+        collision_contacts = self._contact_count(data)  # 碰撞惩罚按有效接触点数累计。
         collision = collision_contacts > 0
         reward -= self._config.collision_penalty_value * collision_contacts
 
@@ -376,15 +374,17 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
         )
 
         nan_done = jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
-        done = jp.logical_or(jp.logical_or(success, collision), nan_done).astype(jp.float32)  # 成功、碰撞、数值炸掉都算终止。
+        done = jp.logical_or(jp.logical_or(success, collision), nan_done).astype(jp.float32)  # 任一终止条件满足后结束回合。
 
         metrics = {
+            **state.metrics,  # 保留包装器维护的统计项，避免评估阶段的 metrics 结构变化。
             "distance": distance,
             "ee_speed": ee_speed,
             "success": success.astype(jp.float32),
             "collision": collision.astype(jp.float32),
         }
         info = {
+            **state.info,  # 保留包装器写入的统计键，避免 JAX 扫描时字典结构变化。
             "rng": state.info["rng"],
             "prev_torque": torque_cmd,
             "prev_joint_vel": joint_vel,
@@ -402,7 +402,7 @@ class UR5ReachMjxEnv(mjx_env.MjxEnv):
 
     @property
     def action_size(self) -> int:
-        return 6  # 策略动作空间仍然只暴露 6 个 arm torque。
+        return 6  # 策略只输出 6 个关节扭矩。
 
     @property
     def mj_model(self) -> mujoco.MjModel:

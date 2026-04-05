@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""本地 MJX reach 环境烟雾测试。"""
+"""Smoke test for the Warp GPU reach environment."""
 
 from __future__ import annotations
 
@@ -14,17 +14,16 @@ if __package__ in (None, ""):
     ROOT = Path(__file__).resolve().parents[1]
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from mjx.backend import describe_warp_runtime, ensure_warp_runtime, playground_importable
-    from mjx.reach_env import UR5ReachMjxEnv, default_config, normalize_impl_name
+    from warp_gpu.env import UR5ReachWarpEnv, default_config
+    from warp_gpu.runtime import describe_warp_runtime, ensure_warp_runtime, playground_importable
 else:
-    from .backend import describe_warp_runtime, ensure_warp_runtime, playground_importable
-    from .reach_env import UR5ReachMjxEnv, default_config, normalize_impl_name
+    from .env import UR5ReachWarpEnv, default_config
+    from .runtime import describe_warp_runtime, ensure_warp_runtime, playground_importable
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="本地 MJX reach 环境自检")
+    p = argparse.ArgumentParser(description="Warp GPU reach 环境自检")
     p.add_argument("--robot", choices=["ur5_cxy", "zero_robotiq"], default="ur5_cxy")
-    p.add_argument("--impl", choices=["warp", "mjx", "jax"], default="warp")
     p.add_argument("--steps", type=int, default=8)
     return p.parse_args()
 
@@ -33,16 +32,11 @@ def main() -> None:
     args = parse_args()
     if not playground_importable():
         raise SystemExit("未检测到 `mujoco_playground`。")
-    impl = normalize_impl_name(args.impl)
-    if impl == "warp":
-        ensure_warp_runtime()
-        print(f"warp={describe_warp_runtime()}")
-    else:
-        print("impl=jax")
+    ensure_warp_runtime()
+    print(f"warp={describe_warp_runtime()}")
 
     cfg = default_config(args.robot)
-    cfg.impl = impl
-    env = UR5ReachMjxEnv(config=cfg)
+    env = UR5ReachWarpEnv(config=cfg)
 
     state = env.reset(jax.random.PRNGKey(42))
     print(f"xml={env.xml_path}")

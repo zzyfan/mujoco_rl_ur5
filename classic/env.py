@@ -1,20 +1,4 @@
-"""纯 MuJoCo 版 UR5 + CXY Robotiq 到点环境。
-
-该文件是完全独立实现：
-1) 不依赖 ROS
-2) 不依赖 Gazebo
-3) 直接实现 Gymnasium 环境接口
-
-学习入口：
-- `MujocoEnvConfig`：实验参数集中管理
-- `UR5MujocoEnv.reset`：每回合重置与目标采样
-- `UR5MujocoEnv.step`：扭矩控制与奖励计算
-
-学习建议（按阅读顺序）：
-1) 先看 `__init__`：理解 MuJoCo 的 model/data 与动作观测定义。
-2) 再看 `reset`：理解 Gymnasium 每回合初始化流程。
-3) 最后看 `step`：理解控制、仿真推进、奖励、终止判定。
-"""
+"""Gymnasium reach environment built on standard MuJoCo simulation."""
 
 from __future__ import annotations
 
