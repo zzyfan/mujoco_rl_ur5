@@ -64,7 +64,7 @@ class TrainArgs:
     success_threshold: float = 0.01  # 到点成功阈值（米）。
     stage1_success_threshold: float = 0.05  # 固定目标阶段成功阈值；先让策略体验到成功。
     stage2_success_threshold: float = 0.03  # 小范围随机阶段成功阈值；再逐步收紧。
-    frame_skip: int = 1  # 每个 RL step 对应 MuJoCo 积分步数。
+    frame_skip: int = 2  # 速度优先时适当增大 frame-skip，减少每个 RL step 的 MuJoCo 调用次数。
     action_target_scale: float = 0.6  # 标准化动作缩放成目标扭矩的比例。
     action_smoothing_alpha: float = 0.75  # 动作低通滤波系数；越大越平滑。
     physics_backend: str = "mujoco"  # 物理后端：mujoco（默认）/warp/auto（优先 warp）。
@@ -315,16 +315,19 @@ def _apply_zero_original_preset(args: TrainArgs) -> None:
 def _apply_classic_throughput_preset(args: TrainArgs) -> None:
     """把 classic 线的大并行训练收回到更现实的吞吐区间。"""
     applied: list[str] = []
-    if not args.render and int(args.n_envs) > 64:
-        args.n_envs = 64
-        applied.append("n_envs=64")
+    if not args.render and int(args.n_envs) > 256:
+        args.n_envs = 256
+        applied.append("n_envs=256")
     if args.algo in {"sac", "td3"}:
-        if int(args.batch_size) > 2048:
-            args.batch_size = 2048
-            applied.append("batch_size=2048")
-        if int(args.gradient_steps) > 8:
-            args.gradient_steps = 8
-            applied.append("gradient_steps=8")
+        if int(args.batch_size) > 1024:
+            args.batch_size = 1024
+            applied.append("batch_size=1024")
+        if int(args.gradient_steps) > 4:
+            args.gradient_steps = 4
+            applied.append("gradient_steps=4")
+    if int(args.frame_skip) < 2:
+        args.frame_skip = 2
+        applied.append("frame_skip=2")
     if applied:
         print(f"已应用 classic 吞吐优先参数: {', '.join(applied)}")
 
