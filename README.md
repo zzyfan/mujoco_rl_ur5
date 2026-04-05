@@ -3,7 +3,7 @@
 纯 MuJoCo 机械臂强化学习项目，当前包含两条训练线：
 
 - `classic/`：主训练线，基于 Gymnasium + Stable-Baselines3
-- `mjx/`：MuJoCo Playground + MJWarp 适配入口
+- `mjx/`：MuJoCo Playground / Brax 训练入口
 
 当前仓库支持两套机械臂模型：
 
@@ -70,17 +70,30 @@ python classic/test.py \
 
 ### `mjx/`
 
-这条线提供 Playground / MJWarp 训练入口：
+这条线提供 MuJoCo Playground / Brax 训练入口。
 
-- `mjx/train.py`
-- `mjx/benchmark.py`
-- `mjx/backend.py`
+- 环境：`mjx/reach_env.py`
+- 训练入口：`mjx/train.py`
+- 自检入口：`mjx/benchmark.py`
+- 后端检测：`mjx/backend.py`
+- 算法：`PPO / SAC`
+- 物理后端：`mjx(jax) / warp`
+
+参数说明：
+
+- `--algo ppo`：调用 `brax.training.agents.ppo`
+- `--algo sac`：调用 `brax.training.agents.sac`
+- `--algo td3`：当前不会启动训练，因为本地 Brax 版本没有 `td3` 训练入口
+- `--impl mjx`：映射到 MuJoCo 的 `jax` 实现
+- `--num-envs`：控制并行训练环境数量
+- `--num-eval-envs`：控制并行评估环境数量
 
 示例：
 
 ```bash
 python -m mjx.benchmark --robot ur5_cxy --impl mjx --steps 2
-python -m mjx.train --robot ur5_cxy --impl warp --num-envs 256
+python -m mjx.train --algo ppo --robot ur5_cxy --impl warp --num-envs 256
+python -m mjx.train --algo sac --robot ur5_cxy --impl mjx --num-envs 16 --num-eval-envs 16
 ```
 
 ## 常用命令
@@ -152,6 +165,21 @@ logs/classic/{algo}/{robot}/{run_name}/
 - `interrupted/`：`Ctrl+C` 中断保存
 - `best_model/`：评估回调保存
 - 旧版输出会在运行时自动同步到 `classic` 分层目录
+
+`mjx/` 默认输出：
+
+```text
+models/mjx/{run_name}/
+  checkpoints/
+  config.json
+  final_policy.msgpack
+```
+
+说明：
+
+- `checkpoints/`：Brax 训练过程中保存的阶段参数
+- `config.json`：训练参数、环境参数和后端信息
+- `final_policy.msgpack`：训练结束时导出的最终策略参数
 
 ## 推荐工作流
 

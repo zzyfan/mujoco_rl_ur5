@@ -5,7 +5,7 @@
 ## 目录分工
 
 - `classic/`：主训练线
-- `mjx/`：Playground + MJWarp 实验线
+- `mjx/`：MuJoCo Playground / Brax 训练线
 - `assets/`：MuJoCo XML、网格和纹理资源
 - `docs/`：补充说明
 - `requirements.txt`：Python 依赖
@@ -27,12 +27,14 @@
 
 - `backend.py`：Warp 和 MuJoCo Playground 检测
 - `benchmark.py`：轻量自检与 smoke test
-- `train.py`：Playground 训练入口适配
+- `reach_env.py`：MJX 版 UR5 reach 环境
+- `train.py`：Playground / Brax 训练入口
 
 适用场景：
 
-- Warp / Playground 实验
-- 跟官方训练器对接
+- JAX / Warp 后端训练测试
+- PPO / SAC 并行训练
+- 跟 Brax 训练器对接
 
 ## 资源目录
 
@@ -48,4 +50,8 @@ models/classic/{algo}/{robot}/{run_name}/
 logs/classic/{algo}/{robot}/{run_name}/
 ```
 
-`mjx/` 输出目录由 Playground 侧决定。
+`mjx/` 会写入：
+
+```text
+models/mjx/{run_name}/
+```
