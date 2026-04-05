@@ -65,12 +65,12 @@ python classic/test.py \
 - 支持课程学习
 - 支持 `VecNormalize`
 - 支持 `best_model / final / interrupted`
-- 支持 `zero_robotiq` 兼容参数
-- 支持 `--legacy-zero-ee-velocity` 复现 zeroarm 旧速度语义
+- 支持 `zero_robotiq` 机器人参数
+- 支持 `--legacy-zero-ee-velocity` 旧版速度读取开关
 
 ### `mjx/`
 
-这条线用于接 Playground / MJWarp 实验：
+这条线提供 Playground / MJWarp 训练入口：
 
 - `mjx/train.py`
 - `mjx/benchmark.py`
@@ -79,8 +79,8 @@ python classic/test.py \
 示例：
 
 ```bash
-python mjx/benchmark.py --run-smoke --env-name CartpoleBalance
-python mjx/train.py --trainer jax-ppo --env-name CartpoleBalance --impl warp
+python -m mjx.benchmark --robot ur5_cxy --impl mjx --steps 2
+python -m mjx.train --robot ur5_cxy --impl warp --num-envs 256
 ```
 
 ## 常用命令
@@ -122,7 +122,7 @@ python classic/test.py \
   --render
 ```
 
-兼容 zeroarm 旧末端速度语义：
+启用旧版末端速度读取：
 
 ```bash
 python classic/train.py \
@@ -158,7 +158,7 @@ logs/classic/{algo}/{robot}/{run_name}/
 1. 先跑 `python -m classic.test --random-policy --episodes 1 --max-steps 10 --no-render`
 2. 再跑 `classic/train.py --no-render`
 3. 需要恢复时使用 `--resume`
-4. 需要复现 zeroarm 旧行为时再加 `--legacy-zero-ee-velocity`
+4. 需要启用旧版速度读取时再加 `--legacy-zero-ee-velocity`
 5. 验收时用 `classic/test.py` 可视化
 
 ## 代码结构

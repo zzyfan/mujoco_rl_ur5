@@ -1,136 +1,224 @@
 #!/usr/bin/env python3
-"""MuJoCo Playground 训练入口适配器（Brax training + MJWarp）。"""  # 代码执行语句：结合上下文理解它对后续流程的影响
+"""本地 UR5/zero Playground PPO 训练入口。"""
 
-from __future__ import annotations  # 依赖导入：先认清这个文件需要哪些外部能力
+from __future__ import annotations
 
-import argparse  # 依赖导入：先认清这个文件需要哪些外部能力
-import os  # 依赖导入：先认清这个文件需要哪些外部能力
-import shlex  # 依赖导入：先认清这个文件需要哪些外部能力
-import subprocess  # 依赖导入：先认清这个文件需要哪些外部能力
-import sys  # 依赖导入：先认清这个文件需要哪些外部能力
-from dataclasses import dataclass  # 依赖导入：先认清这个文件需要哪些外部能力
-from pathlib import Path  # 依赖导入：先认清这个文件需要哪些外部能力
+import argparse
+import functools
+import json
+import sys
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
-if __package__ in (None, ""):  # 条件分支：学习时先看触发条件，再看两边行为差异
-    ROOT = Path(__file__).resolve().parents[1]  # 状态或中间变量：调试时多观察它的值如何流动
-    if str(ROOT) not in sys.path:  # 条件分支：学习时先看触发条件，再看两边行为差异
-        sys.path.insert(0, str(ROOT))  # 代码执行语句：结合上下文理解它对后续流程的影响
-    from mjx.backend import (  # 依赖导入：先认清这个文件需要哪些外部能力
-        describe_warp_runtime,  # 代码执行语句：结合上下文理解它对后续流程的影响
-        detect_playground_root,  # 代码执行语句：结合上下文理解它对后续流程的影响
-        ensure_warp_runtime,  # 代码执行语句：结合上下文理解它对后续流程的影响
-        playground_importable,  # 代码执行语句：结合上下文理解它对后续流程的影响
-        resolve_trainer_entry,  # 代码执行语句：结合上下文理解它对后续流程的影响
-    )  # 收束上一段结构，阅读时回看上面的参数或元素
-else:  # 兜底分支：当前面条件都不满足时走这里
-    from .backend import (  # 依赖导入：先认清这个文件需要哪些外部能力
-        describe_warp_runtime,  # 代码执行语句：结合上下文理解它对后续流程的影响
-        detect_playground_root,  # 代码执行语句：结合上下文理解它对后续流程的影响
-        ensure_warp_runtime,  # 代码执行语句：结合上下文理解它对后续流程的影响
-        playground_importable,  # 代码执行语句：结合上下文理解它对后续流程的影响
-        resolve_trainer_entry,  # 代码执行语句：结合上下文理解它对后续流程的影响
-    )  # 收束上一段结构，阅读时回看上面的参数或元素
+from brax.io import model as brax_model
+from brax.training.agents.ppo import train as ppo
+from mujoco_playground._src import wrapper
+
+if __package__ in (None, ""):
+    ROOT = Path(__file__).resolve().parents[1]
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from mjx.backend import describe_warp_runtime, ensure_warp_runtime, playground_importable
+    from mjx.reach_env import UR5ReachMjxEnv, default_config, normalize_impl_name
+else:
+    from .backend import describe_warp_runtime, ensure_warp_runtime, playground_importable
+    from .reach_env import UR5ReachMjxEnv, default_config, normalize_impl_name
 
 
-@dataclass  # 用 dataclass 收拢配置，调参时优先回到这里
-class PlaygroundTrainArgs:  # 类定义：先理解职责边界，再进入方法细节
-    trainer: str = "jax-ppo"  # 状态或中间变量：调试时多观察它的值如何流动
-    env_name: str = "CartpoleBalance"  # 状态或中间变量：调试时多观察它的值如何流动
-    impl: str = "warp"  # 状态或中间变量：调试时多观察它的值如何流动
-    seed: int = 42  # 状态或中间变量：调试时多观察它的值如何流动
-    playground_root: str = ""  # 状态或中间变量：调试时多观察它的值如何流动
-    dry_run: bool = False  # 状态或中间变量：调试时多观察它的值如何流动
-    test: bool = False  # 状态或中间变量：调试时多观察它的值如何流动
-    test_command: str = ""  # 状态或中间变量：调试时多观察它的值如何流动
+@dataclass
+class TrainArgs:
+    robot: str = "ur5_cxy"  # 两套 XML 共用同一套 reach 逻辑，只在目标范围和 home pose 上分开。
+    impl: str = "warp"  # 真正想跑出吞吐时优先用 warp；`mjx` 会映射到 MuJoCo 的 `jax` impl。
+    seed: int = 42
+    num_timesteps: int = 5_000_000  # Playground PPO 默认靠大样本吞吐推进，不走 replay buffer。
+    num_envs: int = 256  # PPO 训练使用的并行环境数量。
+    num_eval_envs: int = 128  # 评估使用的并行环境数量。
+    num_evals: int = 10
+    learning_rate: float = 3e-4  # PPO 常见起点；学不动先看 reward，再考虑改它。
+    entropy_cost: float = 1e-4
+    discounting: float = 0.99
+    unroll_length: int = 10  # 单次 rollout 片段长度；太短会让优势估计更吵。
+    batch_size: int = 512  # PPO update 的 batch，不是环境并行数。
+    num_minibatches: int = 8
+    num_updates_per_batch: int = 4
+    reward_scaling: float = 1.0
+    normalize_observations: bool = True
+    action_repeat: int = 1
+    episode_length: int = 3000  # 单回合步数上限。
+    frame_skip: int = 1
+    success_threshold: float = 0.01  # 仍然沿用 classic 的“1 cm 内成功”定义。
+    logdir: str = "logs/mjx"
+    model_dir: str = "models/mjx"
+    run_name: str = "ur5_reach_playground"
+    dry_run: bool = False
+    fixed_target_x: float | None = None
+    fixed_target_y: float | None = None
+    fixed_target_z: float | None = None
 
 
-def _parse_args() -> tuple[PlaygroundTrainArgs, list[str]]:  # 函数定义：先看输入输出，再理解内部控制流
-    p = argparse.ArgumentParser(description="Playground 训练入口（默认 MJWarp）")  # 参数解析器：脚本对外暴露的命令行接口从这里定义
-    p.add_argument("--trainer", choices=["jax-ppo", "rsl-ppo"], default="jax-ppo")  # 命令行参数：这里就是直接的调参入口
-    p.add_argument("--env-name", type=str, default="CartpoleBalance")  # 命令行参数：这里就是直接的调参入口
-    p.add_argument("--impl", choices=["warp", "mjx"], default="warp")  # 命令行参数：这里就是直接的调参入口
-    p.add_argument("--seed", type=int, default=42)  # 命令行参数：这里就是直接的调参入口
-    p.add_argument("--playground-root", type=str, default="")  # 命令行参数：这里就是直接的调参入口
-    p.add_argument("--test", action="store_true")  # 命令行参数：这里就是直接的调参入口
-    p.add_argument(  # 命令行参数：这里就是直接的调参入口
-        "--test-command",  # 代码执行语句：结合上下文理解它对后续流程的影响
-        type=str,  # 状态或中间变量：调试时多观察它的值如何流动
-        default="",  # 状态或中间变量：调试时多观察它的值如何流动
-        help="测试模式时执行的命令（示例: \"python learning/train_jax_ppo.py --env_name CartpoleBalance --impl warp --num_timesteps 0\"）",  # 关键调参点：改这里通常会明显改变训练稳定性或收敛速度
-    )  # 收束上一段结构，阅读时回看上面的参数或元素
-    p.add_argument("--dry-run", action="store_true")  # 命令行参数：这里就是直接的调参入口
-    ns, passthrough = p.parse_known_args()  # 状态或中间变量：调试时多观察它的值如何流动
-    return (  # 把当前结果返回给上层调用方
-        PlaygroundTrainArgs(  # 代码执行语句：结合上下文理解它对后续流程的影响
-            trainer=ns.trainer,  # 状态或中间变量：调试时多观察它的值如何流动
-            env_name=ns.env_name,  # 状态或中间变量：调试时多观察它的值如何流动
-            impl=ns.impl,  # 状态或中间变量：调试时多观察它的值如何流动
-            seed=ns.seed,  # 状态或中间变量：调试时多观察它的值如何流动
-            playground_root=ns.playground_root,  # 状态或中间变量：调试时多观察它的值如何流动
-            dry_run=ns.dry_run,  # 状态或中间变量：调试时多观察它的值如何流动
-            test=ns.test,  # 状态或中间变量：调试时多观察它的值如何流动
-            test_command=ns.test_command,  # 状态或中间变量：调试时多观察它的值如何流动
-        ),  # 收束上一段结构，阅读时回看上面的参数或元素
-        passthrough,  # 代码执行语句：结合上下文理解它对后续流程的影响
-    )  # 收束上一段结构，阅读时回看上面的参数或元素
+def _parse_args() -> TrainArgs:
+    p = argparse.ArgumentParser(description="UR5/zero Playground PPO 训练入口")
+    p.add_argument("--robot", choices=["ur5_cxy", "zero_robotiq"], default="ur5_cxy")
+    p.add_argument("--impl", choices=["warp", "mjx", "jax"], default="warp")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--num-timesteps", type=int, default=5_000_000)
+    p.add_argument("--num-envs", type=int, default=256)
+    p.add_argument("--num-eval-envs", type=int, default=128)
+    p.add_argument("--num-evals", type=int, default=10)
+    p.add_argument("--learning-rate", type=float, default=3e-4)
+    p.add_argument("--entropy-cost", type=float, default=1e-4)
+    p.add_argument("--discounting", type=float, default=0.99)
+    p.add_argument("--unroll-length", type=int, default=10)
+    p.add_argument("--batch-size", type=int, default=512)
+    p.add_argument("--num-minibatches", type=int, default=8)
+    p.add_argument("--num-updates-per-batch", type=int, default=4)
+    p.add_argument("--reward-scaling", type=float, default=1.0)
+    p.add_argument("--normalize-observations", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--action-repeat", type=int, default=1)
+    p.add_argument("--episode-length", type=int, default=3000)
+    p.add_argument("--frame-skip", type=int, default=1)
+    p.add_argument("--success-threshold", type=float, default=0.01)
+    p.add_argument("--logdir", type=str, default="logs/mjx")
+    p.add_argument("--model-dir", type=str, default="models/mjx")
+    p.add_argument("--run-name", type=str, default="ur5_reach_playground")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--fixed-target-x", type=float, default=None)
+    p.add_argument("--fixed-target-y", type=float, default=None)
+    p.add_argument("--fixed-target-z", type=float, default=None)
+    ns = p.parse_args()
+    return TrainArgs(
+        robot=ns.robot,
+        impl=ns.impl,
+        seed=ns.seed,
+        num_timesteps=ns.num_timesteps,
+        num_envs=ns.num_envs,
+        num_eval_envs=ns.num_eval_envs,
+        num_evals=ns.num_evals,
+        learning_rate=ns.learning_rate,
+        entropy_cost=ns.entropy_cost,
+        discounting=ns.discounting,
+        unroll_length=ns.unroll_length,
+        batch_size=ns.batch_size,
+        num_minibatches=ns.num_minibatches,
+        num_updates_per_batch=ns.num_updates_per_batch,
+        reward_scaling=ns.reward_scaling,
+        normalize_observations=ns.normalize_observations,
+        action_repeat=ns.action_repeat,
+        episode_length=ns.episode_length,
+        frame_skip=ns.frame_skip,
+        success_threshold=ns.success_threshold,
+        logdir=ns.logdir,
+        model_dir=ns.model_dir,
+        run_name=ns.run_name,
+        dry_run=ns.dry_run,
+        fixed_target_x=ns.fixed_target_x,
+        fixed_target_y=ns.fixed_target_y,
+        fixed_target_z=ns.fixed_target_z,
+    )
 
 
-def _run_train(args: PlaygroundTrainArgs, passthrough: list[str]) -> int:  # 函数定义：先看输入输出，再理解内部控制流
-    ensure_warp_runtime()  # 代码执行语句：结合上下文理解它对后续流程的影响
-    playground_root = detect_playground_root(args.playground_root)  # 状态或中间变量：调试时多观察它的值如何流动
-    if not playground_root and not playground_importable():  # 条件分支：学习时先看触发条件，再看两边行为差异
-        raise RuntimeError(  # 主动抛错：用来尽早暴露错误输入或不支持状态
-            "未检测到 MuJoCo Playground。请先安装并设置 MUJOCO_PLAYGROUND_ROOT，或在其仓库目录中运行。"  # 代码执行语句：结合上下文理解它对后续流程的影响
-        )  # 收束上一段结构，阅读时回看上面的参数或元素
-    entry = resolve_trainer_entry(args.trainer, playground_root)  # 状态或中间变量：调试时多观察它的值如何流动
-    cmd = [  # 状态或中间变量：调试时多观察它的值如何流动
-        *entry,  # 代码执行语句：结合上下文理解它对后续流程的影响
-        "--env_name",  # 代码执行语句：结合上下文理解它对后续流程的影响
-        args.env_name,  # 代码执行语句：结合上下文理解它对后续流程的影响
-        "--impl",  # 代码执行语句：结合上下文理解它对后续流程的影响
-        args.impl,  # 代码执行语句：结合上下文理解它对后续流程的影响
-        "--seed",  # 代码执行语句：结合上下文理解它对后续流程的影响
-        str(args.seed),  # 代码执行语句：结合上下文理解它对后续流程的影响
-        *passthrough,  # 代码执行语句：结合上下文理解它对后续流程的影响
-    ]  # 收束上一段结构，阅读时回看上面的参数或元素
-
-    cwd = playground_root if playground_root else None  # 状态或中间变量：调试时多观察它的值如何流动
-    print(f"训练入口: {' '.join(shlex.quote(x) for x in entry)}")  # 代码执行语句：结合上下文理解它对后续流程的影响
-    print(f"运行目录: {cwd or os.getcwd()}")  # 代码执行语句：结合上下文理解它对后续流程的影响
-    print(f"Warp 运行时: {describe_warp_runtime()}")  # 代码执行语句：结合上下文理解它对后续流程的影响
-    print(f"完整命令: {' '.join(shlex.quote(x) for x in cmd)}")  # 代码执行语句：结合上下文理解它对后续流程的影响
-    if args.dry_run:  # 条件分支：学习时先看触发条件，再看两边行为差异
-        return 0  # 把当前结果返回给上层调用方
-    proc = subprocess.run(cmd, cwd=cwd, check=False)  # 状态或中间变量：调试时多观察它的值如何流动
-    return int(proc.returncode)  # 把当前结果返回给上层调用方
+def _build_env_config(args: TrainArgs):
+    cfg = default_config(args.robot)
+    cfg.impl = normalize_impl_name(args.impl)  # 这里把命令行里的 `mjx` 统一落成 MuJoCo 可识别的 impl。
+    cfg.frame_skip = max(int(args.frame_skip), 1)  # frame_skip 会同步影响 ctrl_dt。
+    cfg.action_repeat = max(int(args.action_repeat), 1)
+    cfg.episode_length = max(int(args.episode_length), 1)
+    cfg.success_threshold = float(args.success_threshold)
+    cfg.fixed_target_x = args.fixed_target_x
+    cfg.fixed_target_y = args.fixed_target_y
+    cfg.fixed_target_z = args.fixed_target_z
+    return cfg
 
 
-def _run_test(args: PlaygroundTrainArgs) -> int:  # 函数定义：先看输入输出，再理解内部控制流
-    if not args.test_command.strip():  # 条件分支：学习时先看触发条件，再看两边行为差异
-        raise RuntimeError(  # 主动抛错：用来尽早暴露错误输入或不支持状态
-            "当前适配器无法自动推断 Playground 测试流程，请显式传入 --test-command。"  # 代码执行语句：结合上下文理解它对后续流程的影响
-        )  # 收束上一段结构，阅读时回看上面的参数或元素
-    ensure_warp_runtime()  # 代码执行语句：结合上下文理解它对后续流程的影响
-    playground_root = detect_playground_root(args.playground_root)  # 状态或中间变量：调试时多观察它的值如何流动
-    cwd = playground_root if playground_root else None  # 状态或中间变量：调试时多观察它的值如何流动
-    cmd = shlex.split(args.test_command)  # 状态或中间变量：调试时多观察它的值如何流动
-    print(f"测试命令: {' '.join(shlex.quote(x) for x in cmd)}")  # 代码执行语句：结合上下文理解它对后续流程的影响
-    print(f"运行目录: {cwd or os.getcwd()}")  # 代码执行语句：结合上下文理解它对后续流程的影响
-    print(f"Warp 运行时: {describe_warp_runtime()}")  # 代码执行语句：结合上下文理解它对后续流程的影响
-    if args.dry_run:  # 条件分支：学习时先看触发条件，再看两边行为差异
-        return 0  # 把当前结果返回给上层调用方
-    proc = subprocess.run(cmd, cwd=cwd, check=False)  # 状态或中间变量：调试时多观察它的值如何流动
-    return int(proc.returncode)  # 把当前结果返回给上层调用方
+def _run_train(args: TrainArgs) -> int:
+    if not playground_importable():
+        raise RuntimeError("未检测到 `mujoco_playground`，无法按 Playground 方式训练。")
+
+    impl = normalize_impl_name(args.impl)
+    if impl == "warp":
+        ensure_warp_runtime()
+
+    env_cfg = _build_env_config(args)
+    run_dir = Path(args.model_dir).resolve() / args.run_name
+    ckpt_dir = run_dir / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    Path(args.logdir).mkdir(parents=True, exist_ok=True)
+
+    config_payload = {
+        "train_args": asdict(args),
+        "env_config": env_cfg.to_dict(),
+        "impl_runtime": describe_warp_runtime() if impl == "warp" else "jax",
+    }
+    with (run_dir / "config.json").open("w", encoding="utf-8") as fp:
+        json.dump(config_payload, fp, indent=2, ensure_ascii=False)
+
+    env = UR5ReachMjxEnv(config=env_cfg)
+    eval_env = UR5ReachMjxEnv(config=env_cfg)
+    wrap_env_fn = functools.partial(
+        wrapper.wrap_for_brax_training,
+        full_reset=True,  # reset 时重新采样目标点。
+    )
+
+    print(f"task=ur5_reach_playground robot={args.robot} impl={impl}")
+    print(f"xml={env.xml_path}")
+    print(f"obs_dim={env.observation_size} action_dim={env.action_size}")
+    print(f"num_envs={args.num_envs} num_eval_envs={args.num_eval_envs} episode_length={args.episode_length}")
+    print(f"run_dir={run_dir}")
+    if impl == "warp":
+        print(f"warp={describe_warp_runtime()}")
+    if args.dry_run:  # dry-run 只验证“任务和训练参数能不能正确拼起来”。
+        return 0
+
+    times = [time.monotonic()]
+
+    def progress(step: int, metrics) -> None:
+        times.append(time.monotonic())
+        if "eval/episode_reward" in metrics:
+            print(f"{step}: eval_reward={float(metrics['eval/episode_reward']):.3f}")
+        elif "episode/sum_reward" in metrics:
+            print(f"{step}: train_reward={float(metrics['episode/sum_reward']):.3f}")
+
+    train_fn = functools.partial(  # 训练入口直接调用 Brax PPO。
+        ppo.train,
+        num_timesteps=args.num_timesteps,
+        num_envs=args.num_envs,
+        episode_length=args.episode_length,
+        action_repeat=args.action_repeat,
+        learning_rate=args.learning_rate,
+        entropy_cost=args.entropy_cost,
+        discounting=args.discounting,
+        unroll_length=args.unroll_length,
+        batch_size=args.batch_size,
+        num_minibatches=args.num_minibatches,
+        num_updates_per_batch=args.num_updates_per_batch,
+        reward_scaling=args.reward_scaling,
+        normalize_observations=args.normalize_observations,
+        seed=args.seed,
+        num_evals=args.num_evals,
+        num_eval_envs=args.num_eval_envs,
+        wrap_env_fn=wrap_env_fn,
+        save_checkpoint_path=ckpt_dir,  # checkpoint 仍按 Playground/Brax 的格式落盘。
+    )
+
+    make_inference_fn, params, _ = train_fn(
+        environment=env,
+        eval_env=eval_env,
+        progress_fn=progress,
+    )
+    del make_inference_fn
+    brax_model.save_params(str(run_dir / "final_policy.msgpack"), params)  # 额外导出最终参数文件。
+
+    print("Done training.")
+    if len(times) > 1:
+        print(f"jit_compile_s={times[1] - times[0]:.2f}")
+        print(f"total_train_s={times[-1] - times[0]:.2f}")
+    return 0
 
 
-def main() -> None:  # 脚本入口：先看它如何把各个步骤串起来
-    args, passthrough = _parse_args()  # 状态或中间变量：调试时多观察它的值如何流动
-    if args.test:  # 条件分支：学习时先看触发条件，再看两边行为差异
-        code = _run_test(args)  # 状态或中间变量：调试时多观察它的值如何流动
-    else:  # 兜底分支：当前面条件都不满足时走这里
-        code = _run_train(args, passthrough)  # 状态或中间变量：调试时多观察它的值如何流动
-    raise SystemExit(code)  # 主动抛错：用来尽早暴露错误输入或不支持状态
+def main() -> None:
+    raise SystemExit(_run_train(_parse_args()))
 
 
-if __name__ == "__main__":  # 条件分支：学习时先看触发条件，再看两边行为差异
-    main()  # 代码执行语句：结合上下文理解它对后续流程的影响
+if __name__ == "__main__":
+    main()
