@@ -74,6 +74,7 @@ python classic/test.py \
 
 - 环境：`warp_gpu/env.py`
 - 训练入口：`warp_gpu/train.py`
+- 测试入口：`warp_gpu/test.py`
 - 自检入口：`warp_gpu/smoke.py`
 - 运行时检测：`warp_gpu/runtime.py`
 - 算法：`PPO / SAC`
@@ -95,6 +96,7 @@ python classic/test.py \
 python -m warp_gpu.smoke --robot ur5_cxy --steps 2
 python -m warp_gpu.train --algo ppo --robot ur5_cxy --num-envs 256
 python -m warp_gpu.train --algo sac --robot ur5_cxy --num-envs 16 --num-eval-envs 16
+python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --episodes 3
 ```
 
 ## 训练日志
@@ -197,6 +199,7 @@ models/warp_gpu/{algo}/{robot}/{run_name}/
 - `config.json`：训练参数、环境参数和 Warp 运行时信息
 - `final_policy.msgpack`：训练结束时导出的最终策略参数
 - `warp_gpu/` 当前只接入官方 Brax 自带的 `PPO / SAC`
+- `warp_gpu/test.py` 默认读取 `final_policy.msgpack`，也支持指定 `latest-checkpoint` 或某个 checkpoint 目录
 
 ## 推荐工作流
 

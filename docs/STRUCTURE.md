@@ -29,6 +29,7 @@
 - `smoke.py`：轻量自检与 smoke test
 - `env.py`：Warp GPU reach 环境
 - `train.py`：Playground / Brax 训练入口、进度条和阶段训练日志
+- `test.py`：Warp GPU 策略推理测试（final_policy 或 checkpoint）
 
 适用场景：
 
