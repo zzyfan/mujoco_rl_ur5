@@ -5,12 +5,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
 import jax
 import jax.numpy as jp
+import mujoco
+from mujoco import mjx
+try:
+    import mujoco.viewer as mj_viewer
+except Exception:
+    mj_viewer = None
 from brax.io import model as brax_model
 from brax.training.acme import running_statistics
 from brax.training.agents.ppo import networks as ppo_networks
@@ -48,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fixed-target-x", type=float, default=None)  # 固定目标点 x，便于稳定观察策略表现。
     p.add_argument("--fixed-target-y", type=float, default=None)  # 固定目标点 y。
     p.add_argument("--fixed-target-z", type=float, default=None)  # 固定目标点 z。
+    p.add_argument("--render", action="store_true")  # 打开可视化窗口，便于肉眼观察策略动作。
+    p.add_argument("--no-render", action="store_false", dest="render")  # 显式关闭渲染。
+    p.set_defaults(render=False)
+    p.add_argument("--render-mode", choices=["human"], default="human")  # 当前 Warp GPU 测试只接入 human 窗口渲染。
     p.add_argument("--print-step-reward", action="store_true")  # 打印每一步奖励、距离和终止标记。
     return p.parse_args()
 
@@ -120,6 +132,27 @@ def _restore_running_statistics(observation_size, state_dict: dict):
     """把 checkpoint 里的 normalizer 字典恢复成 RunningStatisticsState。"""
     template = running_statistics.init_state(jp.zeros(observation_size, dtype=jp.float32))
     return flax_serialization.from_state_dict(template, state_dict)
+
+
+def _render_human(
+    env: UR5ReachWarpEnv,
+    state,
+    host_data: mujoco.MjData,
+    viewer,
+):
+    """把 Warp 状态同步回主机侧 MjData，并刷新 human viewer。"""
+    if viewer is None:
+        return None
+    is_running = getattr(viewer, "is_running", None)
+    if callable(is_running):
+        try:
+            if not bool(is_running()):
+                return None
+        except Exception:
+            return None
+    mjx.get_data_into(host_data, env.mj_model, state.data)
+    viewer.sync()
+    return viewer
 
 
 def _load_checkpoint_network_config(args: argparse.Namespace, checkpoint_dir: Path) -> dict:
@@ -233,6 +266,14 @@ def main() -> None:
     else:
         policy, loaded_path = _load_checkpoint_policy(args, run_dir)
 
+    host_data = None
+    viewer = None
+    if args.render and args.render_mode == "human":
+        if mj_viewer is None:
+            raise SystemExit("当前环境无法导入 `mujoco.viewer`，不能使用 human 渲染。")
+        host_data = mujoco.MjData(env.mj_model)  # host 侧 MjData 只用于窗口渲染，不参与策略计算。
+        viewer = mj_viewer.launch_passive(env.mj_model, host_data)
+
     print(f"warp={describe_warp_runtime()}")
     print(f"xml={env.xml_path}")
     print(f"loaded_artifact={loaded_path}")
@@ -242,6 +283,8 @@ def main() -> None:
     for ep in range(max(int(args.episodes), 1)):
         rng, reset_rng = jax.random.split(rng)
         state = env.reset(reset_rng)
+        if viewer is not None and host_data is not None:
+            viewer = _render_human(env, state, host_data, viewer)
         total_reward = 0.0
         steps = 0
         while steps < max(int(args.max_steps), 1) and not bool(state.done):
@@ -249,6 +292,9 @@ def main() -> None:
             action, _ = policy(state.obs, act_rng)
             action = jp.asarray(action, dtype=jp.float32)
             state = env.step(state, action)
+            if viewer is not None and host_data is not None:
+                viewer = _render_human(env, state, host_data, viewer)
+                time.sleep(0.01)  # 给 viewer 一点刷新时间，避免窗口看起来一闪而过。
             steps += 1
             reward = float(state.reward)
             total_reward += reward
@@ -268,6 +314,12 @@ def main() -> None:
 
     if rewards:
         print(f"平均奖励: {sum(rewards) / len(rewards):.3f}")
+    if args.render and args.render_mode == "human":
+        # 某些 GLX/X11 组合在解释器回收 viewer 时会卡在窗口销毁阶段。
+        # 推理结果打印完成后直接退出进程，避免渲染清理阻塞。
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
 
 if __name__ == "__main__":

@@ -97,6 +97,7 @@ python -m warp_gpu.smoke --robot ur5_cxy --steps 2
 python -m warp_gpu.train --algo ppo --robot ur5_cxy --num-envs 256
 python -m warp_gpu.train --algo sac --robot ur5_cxy --num-envs 16 --num-eval-envs 16
 python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --episodes 3
+python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --episodes 1 --render --render-mode human
 ```
 
 ## 训练日志
@@ -200,6 +201,7 @@ models/warp_gpu/{algo}/{robot}/{run_name}/
 - `final_policy.msgpack`：训练结束时导出的最终策略参数
 - `warp_gpu/` 当前只接入官方 Brax 自带的 `PPO / SAC`
 - `warp_gpu/test.py` 默认读取 `final_policy.msgpack`，也支持指定 `latest-checkpoint` 或某个 checkpoint 目录
+- `warp_gpu/test.py` 现在支持 `--render --render-mode human` 做窗口推理观察
 
 ## 推荐工作流
 
