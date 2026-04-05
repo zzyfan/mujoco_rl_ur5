@@ -130,6 +130,10 @@ class MujocoEnvConfig:
     success_speed_bonus_slow: float = 1000.0
     success_speed_bonus_medium: float = 500.0
     collision_penalty_value: float = 8000.0  # 碰撞惩罚；提高后让“撞上去结束”更难成为局部最优。
+    runaway_distance_threshold: float = 2.0  # 末端离目标过远时判定为跑飞，避免长回合把负奖励滚到百万级。
+    runaway_ee_speed_threshold: float = 4.0  # 末端速度超过该阈值时视为数值或控制异常。
+    runaway_joint_velocity_threshold: float = 12.0  # 任一关节速度过大时终止回合，避免姿态持续发散。
+    runaway_penalty_value: float = 3000.0  # 跑飞固定惩罚，用于把“发散失败”和普通退步区分开。
     # 渲染相机参数。
     render_camera_name: str = "workbench_camera"
     viewer_lock_camera: bool = False
@@ -678,6 +682,20 @@ class UR5MujocoEnv(gym.Env):
             idle_penalty = -float(self.config.idle_penalty_value)
             reward += idle_penalty
 
+        # 跑飞保护用于截断“既不成功也不碰撞，只是持续发散”的长回合坏解。
+        runaway_detected = (
+            distance > float(self.config.runaway_distance_threshold)
+            or ee_speed > float(self.config.runaway_ee_speed_threshold)
+            or float(np.max(np.abs(joint_vel))) > float(self.config.runaway_joint_velocity_threshold)
+            or not np.isfinite(distance)
+            or not np.isfinite(ee_speed)
+            or not np.all(np.isfinite(joint_vel))
+        )
+        runaway_penalty = 0.0
+        if runaway_detected:
+            runaway_penalty = -float(self.config.runaway_penalty_value)
+            reward += runaway_penalty
+
         collision_detected = False
         collision_contacts, raw_collision_contacts = self._count_hazardous_contacts()
         collision_penalty = 0.0
@@ -687,13 +705,14 @@ class UR5MujocoEnv(gym.Env):
             reward += collision_penalty
 
         success = distance <= float(self.config.success_threshold)
-        terminated = bool(success or collision_detected)
+        terminated = bool(success or collision_detected or runaway_detected)
         truncated = self.step_count >= int(self.config.max_steps)
 
         success_reward = 0.0
         success_remaining_step_reward = 0.0
         success_speed_reward = 0.0
         collision_remaining_step_penalty = 0.0
+        runaway_remaining_step_penalty = 0.0
         if success:
             success_reward = float(self.config.success_bonus)
             success_remaining_step_reward = float(self.config.success_remaining_step_gain) * float(self.config.max_steps - self.step_count)
@@ -707,6 +726,10 @@ class UR5MujocoEnv(gym.Env):
         elif collision_detected:
             collision_remaining_step_penalty = -float(self.config.step_penalty) * float(self.config.max_steps - self.step_count)
             reward += collision_remaining_step_penalty
+        elif runaway_detected:
+            # 跑飞后同步扣掉剩余时间惩罚，让“尽快结束发散轨迹”比继续乱跑更划算。
+            runaway_remaining_step_penalty = -float(self.config.step_penalty) * float(self.config.max_steps - self.step_count)
+            reward += runaway_remaining_step_penalty
 
         info = {
             "distance": distance,
@@ -715,6 +738,7 @@ class UR5MujocoEnv(gym.Env):
             "physics_backend": self.physics_backend,
             "ee_speed": ee_speed,
             "collision": collision_detected,
+            "runaway": runaway_detected,
             "collision_contacts": collision_contacts,
             "raw_collision_contacts": raw_collision_contacts,
             "curriculum_stage": self.curriculum_stage,
@@ -730,10 +754,12 @@ class UR5MujocoEnv(gym.Env):
                 "action_magnitude_penalty": action_magnitude_penalty,
                 "action_change_penalty": action_change_penalty,
                 "idle_penalty": idle_penalty,
+                "runaway_penalty": runaway_penalty,
                 "collision_penalty": collision_penalty,
                 "success_reward": success_reward,
                 "success_remaining_step_reward": success_remaining_step_reward,
                 "success_speed_reward": success_speed_reward,
+                "runaway_remaining_step_penalty": runaway_remaining_step_penalty,
                 "collision_remaining_step_penalty": collision_remaining_step_penalty,
                 "raw_collision_contacts": raw_collision_contacts,
             },
