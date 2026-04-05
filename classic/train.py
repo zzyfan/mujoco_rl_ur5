@@ -312,6 +312,23 @@ def _apply_zero_original_preset(args: TrainArgs) -> None:
         print(f"已应用 zero_robotiq 默认参数: {', '.join(applied)}")
 
 
+def _apply_classic_throughput_preset(args: TrainArgs) -> None:
+    """把 classic 线的大并行训练收回到更现实的吞吐区间。"""
+    applied: list[str] = []
+    if not args.render and int(args.n_envs) > 64:
+        args.n_envs = 64
+        applied.append("n_envs=64")
+    if args.algo in {"sac", "td3"}:
+        if int(args.batch_size) > 2048:
+            args.batch_size = 2048
+            applied.append("batch_size=2048")
+        if int(args.gradient_steps) > 8:
+            args.gradient_steps = 8
+            applied.append("gradient_steps=8")
+    if applied:
+        print(f"已应用 classic 吞吐优先参数: {', '.join(applied)}")
+
+
 def _make_env(args: TrainArgs, render_mode: str | None = None):
     """构造 `make_vec_env` 需要的 `env_kwargs`。"""
     cfg = MujocoEnvConfig(  # 把训练参数映射成环境配置对象。
@@ -691,6 +708,7 @@ def _build_model(args: TrainArgs, env, device: str):
 def train(args: TrainArgs):  # 训练主流程：排查训练问题优先顺着这里读
     """训练主流程。"""
     _apply_zero_original_preset(args)  # `zero_robotiq` 会自动套用一组默认训练参数。
+    _apply_classic_throughput_preset(args)  # classic 线先避免极端并行把 CPU 调度和 IPC 开销放大成吞吐倒挂。
     register_env()  # 注册 Gym 环境 id。
     os.makedirs(args.model_dir, exist_ok=True)  # 创建模型根目录。
     os.makedirs(args.log_dir, exist_ok=True)  # 创建日志根目录。
