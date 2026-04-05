@@ -67,7 +67,9 @@ class MujocoEnvConfig:
     model_xml: str = "assets/robotiq_cxy/lab_env.xml"  # MuJoCo XML 模型路径。
     frame_skip: int = 1  # 每个环境 step 前向推进的物理步数。
     max_steps: int = 3000  # 单回合最大决策步数。
-    success_threshold: float = 0.01  # 成功判定距离阈值。
+    success_threshold: float = 0.01  # 课程最后阶段使用的成功判定距离阈值。
+    stage1_success_threshold: float = 0.05  # 固定目标阶段的成功距离阈值；先放宽，帮助策略学会“成功一次”。
+    stage2_success_threshold: float = 0.03  # 小范围随机阶段的成功距离阈值；用于从固定点过渡到局部泛化。
 
     # 目标采样空间（按当前模型可达区设置）。
     target_x_min: float = -0.95
@@ -93,8 +95,10 @@ class MujocoEnvConfig:
     legacy_zero_ee_velocity: bool = False  # 是否按兼容公式读取末端速度特征。
 
     # 六个机械臂关节的扭矩范围。
-    torque_low: float = -10.0  # 扭矩下限；适度收紧动作范围，减少“快速接近后直接撞上去”的坏解。
-    torque_high: float = 10.0  # 扭矩上限；与下限对称，便于策略先学会可控推进。
+    torque_low: float = -10.0  # 扭矩下限；实际控制量会由标准化动作缩放到这个范围。
+    torque_high: float = 10.0  # 扭矩上限；实际控制量会由标准化动作缩放到这个范围。
+    action_target_scale: float = 0.6  # 标准化动作到目标扭矩的缩放比例；越小越保守。
+    action_smoothing_alpha: float = 0.75  # 动作滤波系数；越大越依赖上一时刻扭矩。
     # 到点任务默认保持夹爪打开。
     fixed_gripper_ctrl: float = 0.0
     enable_gravity_motors: bool = True  # 是否向重力补偿电机写入固定控制量。
@@ -122,8 +126,8 @@ class MujocoEnvConfig:
     idle_distance_threshold: float = 0.08  # 当距离大于该值时，视作“还远离目标”。
     idle_speed_threshold: float = 0.015  # 当末端速度低于该值时，视作“几乎不动”。
     idle_penalty_value: float = 0.08  # 远离目标却几乎不动时的惩罚；用于打破 PPO 的静止策略。
-    phase_thresholds: tuple[float, ...] = (0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002)
-    phase_rewards: tuple[float, ...] = (100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0)
+    phase_thresholds: tuple[float, ...] = (1.6, 1.3, 1.0, 0.8, 0.6, 0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002)
+    phase_rewards: tuple[float, ...] = (20.0, 35.0, 50.0, 70.0, 90.0, 100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0)
     success_bonus: float = 10000.0
     success_remaining_step_gain: float = 4.0
     success_speed_bonus_very_slow: float = 2000.0
@@ -244,10 +248,10 @@ class UR5MujocoEnv(gym.Env):
         self.ignored_contact_geom_ids = self._collect_ignored_contact_geom_ids()
 
         self.action_space = spaces.Box(
-            low=np.full((6,), self.config.torque_low, dtype=np.float32),
-            high=np.full((6,), self.config.torque_high, dtype=np.float32),
+            low=np.full((6,), -1.0, dtype=np.float32),
+            high=np.full((6,), 1.0, dtype=np.float32),
             dtype=np.float32,
-        )
+        )  # 策略始终输出标准化动作，环境再把它映射成真实扭矩。
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(24,), dtype=np.float32)  # 24 维布局要和训练好的策略完全匹配。
 
         mujoco.mj_forward(self.model, self.data)
@@ -395,6 +399,28 @@ class UR5MujocoEnv(gym.Env):
         # 第 3 阶段：全范围随机（最终训练目标）。
         self.curriculum_stage = "stage3_full_random"
         return self._sample_target_pos()
+
+    def _current_success_threshold(self) -> float:
+        """按课程阶段返回当前成功距离阈值。"""
+        if self.curriculum_stage == "stage1_fixed":
+            return float(self.config.stage1_success_threshold)
+        if self.curriculum_stage == "stage2_small_random":
+            return float(self.config.stage2_success_threshold)
+        return float(self.config.success_threshold)
+
+    def _scale_policy_action(self, action: np.ndarray) -> np.ndarray:
+        """把标准化动作映射成平滑后的真实扭矩。"""
+        action = np.asarray(action, dtype=np.float32).reshape(6)
+        action = np.clip(action, -1.0, 1.0)
+        torque_low = float(self.config.torque_low)
+        torque_high = float(self.config.torque_high)
+        target_scale = float(np.clip(self.config.action_target_scale, 1e-3, 1.0))
+        positive_limit = torque_high * target_scale
+        negative_limit = abs(torque_low) * target_scale
+        target_torque = np.where(action >= 0.0, action * positive_limit, action * negative_limit).astype(np.float32)
+        smoothing_alpha = float(np.clip(self.config.action_smoothing_alpha, 0.0, 0.999))
+        torque_cmd = smoothing_alpha * self.prev_torque + (1.0 - smoothing_alpha) * target_torque
+        return np.clip(torque_cmd, torque_low, torque_high).astype(np.float32)
 
     def _get_ee_pos(self) -> np.ndarray:
         """读取夹爪两指中心点的位置。"""
@@ -570,6 +596,7 @@ class UR5MujocoEnv(gym.Env):
             "target_pos": self.target_pos.copy(),
             "curriculum_stage": self.curriculum_stage,
             "episode_index": int(self.episode_count),
+            "success_threshold": self._current_success_threshold(),
             "physics_backend": self.physics_backend,
         }
         # 课程计数器在 episode 初始化完成后 +1。
@@ -578,7 +605,7 @@ class UR5MujocoEnv(gym.Env):
         return obs, info
 
     def step(self, action: np.ndarray):
-        """Gymnasium step：输入 6 维关节扭矩动作。"""
+        """Gymnasium step：输入 6 维标准化动作，环境内部再映射成扭矩。"""
         # 在写入新动作前先缓存上一时刻的控制量和关节速度。
         self.prev_torque = self.data.ctrl[self.arm_actuator_ids].copy().astype(np.float32)
         if self.physics_backend == "warp" and self._warp_qvel is not None:
@@ -587,8 +614,7 @@ class UR5MujocoEnv(gym.Env):
             self.prev_joint_vel = self.data.qvel[self.arm_qvel_adr].copy().astype(np.float32)
 
         # 1) 动作清洗与限幅。
-        torque_cmd = np.asarray(action, dtype=np.float32).reshape(6)
-        torque_cmd = np.clip(torque_cmd, float(self.config.torque_low), float(self.config.torque_high))  # 限幅操作：调大调小时要关注稳定性和探索范围
+        torque_cmd = self._scale_policy_action(action)
 
         # 2) 执行扭矩控制。
         # 注意：这一步是“策略输出 -> 物理引擎控制输入”的关键桥梁。
@@ -704,9 +730,11 @@ class UR5MujocoEnv(gym.Env):
             collision_penalty = -float(self.config.collision_penalty_value) * float(collision_contacts)
             reward += collision_penalty
 
-        success = distance <= float(self.config.success_threshold)
+        current_success_threshold = self._current_success_threshold()
+        success = distance <= current_success_threshold
         terminated = bool(success or collision_detected or runaway_detected)
         truncated = self.step_count >= int(self.config.max_steps)
+        timeout = bool(truncated and not terminated)
 
         success_reward = 0.0
         success_remaining_step_reward = 0.0
@@ -739,10 +767,12 @@ class UR5MujocoEnv(gym.Env):
             "ee_speed": ee_speed,
             "collision": collision_detected,
             "runaway": runaway_detected,
+            "timeout": timeout,
             "collision_contacts": collision_contacts,
             "raw_collision_contacts": raw_collision_contacts,
             "curriculum_stage": self.curriculum_stage,
             "episode_index": int(self.episode_count),
+            "success_threshold": current_success_threshold,
             "reward_info": {
                 "step_penalty": -float(self.config.step_penalty),
                 "improvement_reward": improvement_reward,
@@ -762,6 +792,7 @@ class UR5MujocoEnv(gym.Env):
                 "runaway_remaining_step_penalty": runaway_remaining_step_penalty,
                 "collision_remaining_step_penalty": collision_remaining_step_penalty,
                 "raw_collision_contacts": raw_collision_contacts,
+                "success_threshold": current_success_threshold,
             },
         }
         return obs, float(reward), terminated, truncated, info

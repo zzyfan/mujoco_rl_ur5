@@ -10,6 +10,10 @@
 - `ur5_cxy`
 - `zero_robotiq`
 
+补充文档：
+
+- [训练改进记录](/home/zzyfan/mujoco_ur5_rl/docs/TRAINING_IMPROVEMENTS.md)
+
 ## 快速开始
 
 安装依赖：
@@ -63,6 +67,7 @@ python classic/test.py \
 特点：
 
 - 支持课程学习
+- 支持“固定目标 -> 小范围随机 -> 全范围随机”的自动课程学习
 - 支持 `VecNormalize`
 - 支持 `best_model / final / interrupted`
 - 支持 `zero_robotiq` 机器人参数
@@ -89,9 +94,12 @@ python classic/test.py \
 - `TD3`：当前 Brax 官方安装包没有提供训练入口，因此 `warp_gpu/` 不支持
 - `--num-envs`：控制并行训练环境数量
 - `--num-eval-envs`：控制并行评估环境数量
+- `--target-sampling-mode`：控制目标采样模式，可选 `fixed / small_random / full_random`
+- `--target-range-scale`：控制 `small_random` 模式的采样范围
 - `--naconmax / --naccdmax / --njmax`：控制 Warp 接触缓存和约束缓存大小
 - 运行前提：需要 `warp-lang`、`mujoco-warp` 和可用 CUDA 设备
 - `warp_gpu/env.py` 与 `classic/env.py` 现在使用同一套危险碰撞过滤逻辑：忽略目标球、灯光和机器人内部自接触
+- `warp_gpu/` 当前支持“分阶段启动”的课程学习：先用固定目标训练，再切到小范围随机和全范围随机
 
 示例：
 
@@ -107,8 +115,8 @@ python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --epi
 
 `classic/` 和 `warp_gpu/` 现在都会在训练过程中打印阶段日志。
 
-- `classic/`：按时间步输出最近窗口内的 `recent_reward / recent_ep_len / recent_distance / success_rate / collision_rate`，若开启评估还会附带 `eval_reward`
-- `warp_gpu/`：除了进度条，还会打印 Brax 回调返回的关键指标，例如 `eval_episode_reward / episode_sum_reward / distance / success / collision`
+- `classic/`：按时间步输出最近窗口内的 `recent_reward / recent_ep_len / recent_distance / success_rate / collision_rate / runaway_rate / timeout_rate`，若开启评估还会附带 `eval_reward`
+- `warp_gpu/`：除了进度条，还会打印 Brax 回调返回的关键指标，例如 `eval_episode_reward / episode_sum_reward / distance / success / collision / runaway / timeout`
 - 训练结束时两条线都会额外打印最后一次可用回报
 - `collision_rate` 现在对应“过滤后的危险碰撞率”；若需要对照原始 MuJoCo 接触数，可查看 `info['raw_collision_contacts']`
 

@@ -50,6 +50,10 @@ def _collect_logged_metrics(metrics: dict) -> dict[str, float]:
         "episode/success",
         "eval/collision",
         "episode/collision",
+        "eval/runaway",
+        "episode/runaway",
+        "eval/timeout",
+        "episode/timeout",
     )
     logged: dict[str, float] = {}
     for key in preferred_keys:
@@ -86,10 +90,16 @@ class TrainArgs:
     action_repeat: int = 1  # 同一动作重复执行的物理步数。
     episode_length: int = 3000  # 单回合最大决策步数。
     frame_skip: int = 1  # 控制步长与仿真步长的倍率。
-    success_threshold: float = 0.01  # 成功判定距离阈值，单位米。
+    success_threshold: float = 0.01  # 最终阶段成功判定距离阈值，单位米。
+    stage1_success_threshold: float = 0.05  # 固定目标阶段成功阈值。
+    stage2_success_threshold: float = 0.03  # 小范围随机阶段成功阈值。
     naconmax: int = 128  # 接触缓存容量。
     naccdmax: int = 128  # CCD 接触缓存容量。
     njmax: int = 64  # 约束缓存容量。
+    target_sampling_mode: str = "full_random"  # 目标采样模式：`full_random` / `small_random` / `fixed`。
+    target_range_scale: float = 0.35  # 小范围随机模式的目标范围缩放比例。
+    action_target_scale: float = 0.6  # 标准化动作缩放成目标扭矩的比例。
+    action_smoothing_alpha: float = 0.75  # 动作低通滤波系数。
     logdir: str = "logs/warp_gpu"  # 文本日志输出目录。
     model_dir: str = "models/warp_gpu"  # 配置、checkpoint 和最终参数目录。
     run_name: str = "ur5_reach_warp_gpu"  # 当前实验名称。
@@ -125,9 +135,15 @@ def _parse_args() -> TrainArgs:
     p.add_argument("--episode-length", type=int, default=3000)  # 单回合最大决策步数。
     p.add_argument("--frame-skip", type=int, default=1)  # 控制步长相对仿真步长的倍率。
     p.add_argument("--success-threshold", type=float, default=0.01)  # 成功判定距离阈值。
+    p.add_argument("--stage1-success-threshold", type=float, default=0.05)  # 固定目标阶段成功阈值。
+    p.add_argument("--stage2-success-threshold", type=float, default=0.03)  # 小范围随机阶段成功阈值。
     p.add_argument("--naconmax", type=int, default=128)  # 接触缓存容量。
     p.add_argument("--naccdmax", type=int, default=128)  # CCD 接触缓存容量。
     p.add_argument("--njmax", type=int, default=64)  # 约束缓存容量。
+    p.add_argument("--target-sampling-mode", choices=["full_random", "small_random", "fixed"], default="full_random")  # 目标采样模式。
+    p.add_argument("--target-range-scale", type=float, default=0.35)  # 小范围随机模式下的范围缩放。
+    p.add_argument("--action-target-scale", type=float, default=0.6)  # 标准化动作缩放比例。
+    p.add_argument("--action-smoothing-alpha", type=float, default=0.75)  # 动作滤波系数。
     p.add_argument("--logdir", type=str, default="logs/warp_gpu")  # 日志目录。
     p.add_argument("--model-dir", type=str, default="models/warp_gpu")  # 配置和模型输出目录。
     p.add_argument("--run-name", type=str, default="ur5_reach_warp_gpu")  # 当前实验名称。
@@ -161,9 +177,15 @@ def _parse_args() -> TrainArgs:
         episode_length=ns.episode_length,
         frame_skip=ns.frame_skip,
         success_threshold=ns.success_threshold,
+        stage1_success_threshold=ns.stage1_success_threshold,
+        stage2_success_threshold=ns.stage2_success_threshold,
         naconmax=ns.naconmax,
         naccdmax=ns.naccdmax,
         njmax=ns.njmax,
+        target_sampling_mode=ns.target_sampling_mode,
+        target_range_scale=ns.target_range_scale,
+        action_target_scale=ns.action_target_scale,
+        action_smoothing_alpha=ns.action_smoothing_alpha,
         logdir=ns.logdir,
         model_dir=ns.model_dir,
         run_name=ns.run_name,
@@ -180,9 +202,15 @@ def _build_env_config(args: TrainArgs):
     cfg.action_repeat = max(int(args.action_repeat), 1)  # `action_repeat` 控制同一动作连续执行多少个决策步。
     cfg.episode_length = max(int(args.episode_length), 1)  # 单回合最大决策步数。
     cfg.success_threshold = float(args.success_threshold)  # 奖励和终止逻辑共用这个成功阈值。
+    cfg.stage1_success_threshold = float(args.stage1_success_threshold)  # 固定目标阶段成功阈值。
+    cfg.stage2_success_threshold = float(args.stage2_success_threshold)  # 小范围随机阶段成功阈值。
     cfg.naconmax = max(int(args.naconmax), 1)  # Warp 接触缓存容量。
     cfg.naccdmax = max(int(args.naccdmax), 1)  # Warp CCD 接触缓存容量。
     cfg.njmax = max(int(args.njmax), 1)  # Warp 约束缓存容量。
+    cfg.target_sampling_mode = str(args.target_sampling_mode)  # 目标采样模式。
+    cfg.target_range_scale = float(args.target_range_scale)  # 小范围随机模式的范围缩放比例。
+    cfg.action_target_scale = float(args.action_target_scale)  # 标准化动作缩放比例。
+    cfg.action_smoothing_alpha = float(args.action_smoothing_alpha)  # 动作滤波系数。
     cfg.fixed_target_x = args.fixed_target_x  # 固定目标点 x。
     cfg.fixed_target_y = args.fixed_target_y  # 固定目标点 y。
     cfg.fixed_target_z = args.fixed_target_z  # 固定目标点 z。
@@ -228,7 +256,10 @@ def _run_train(args: TrainArgs) -> int:
 
     print(f"task=ur5_reach_warp_gpu algo={args.algo} robot={args.robot}")
     print(f"xml={(Path(env_cfg.model_xml).resolve())}")
-    print(f"num_envs={args.num_envs} num_eval_envs={args.num_eval_envs} episode_length={args.episode_length}")
+    print(
+        f"num_envs={args.num_envs} num_eval_envs={args.num_eval_envs} "
+        f"episode_length={args.episode_length} target_sampling_mode={args.target_sampling_mode}"
+    )
     print(f"run_dir={run_dir}")
     print(f"warp={describe_warp_runtime()}")
     print("building_train_env=true")
@@ -281,13 +312,21 @@ def _run_train(args: TrainArgs) -> int:
             postfix["eval_collision"] = f"{logged_metrics['eval/collision']:.2%}"
         elif "episode/collision" in logged_metrics:
             postfix["train_collision"] = f"{logged_metrics['episode/collision']:.2%}"
+        if "eval/runaway" in logged_metrics:
+            postfix["eval_runaway"] = f"{logged_metrics['eval/runaway']:.2%}"
+        elif "episode/runaway" in logged_metrics:
+            postfix["train_runaway"] = f"{logged_metrics['episode/runaway']:.2%}"
+        if "eval/timeout" in logged_metrics:
+            postfix["eval_timeout"] = f"{logged_metrics['eval/timeout']:.2%}"
+        elif "episode/timeout" in logged_metrics:
+            postfix["train_timeout"] = f"{logged_metrics['episode/timeout']:.2%}"
         if postfix:
             progress_bar.set_postfix(postfix)
         if logged_metrics:
             summary_parts = [f"[训练日志] step={current_step}"]
             for key, value in logged_metrics.items():
                 label = key.replace("/", "_")
-                if "success" in key or "collision" in key:
+                if "success" in key or "collision" in key or "runaway" in key or "timeout" in key:
                     summary_parts.append(f"{label}={value:.2%}")
                 elif "distance" in key:
                     summary_parts.append(f"{label}={value:.4f}")

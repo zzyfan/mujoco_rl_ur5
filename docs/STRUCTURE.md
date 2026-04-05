@@ -50,6 +50,10 @@
 - `capsule / cylinder / box` 代理体负责训练时的碰撞检测
 - 这样可以减少复杂网格接触带来的误判和求解开销
 
+## 文档
+
+- [TRAINING_IMPROVEMENTS.md](/home/zzyfan/mujoco_ur5_rl/docs/TRAINING_IMPROVEMENTS.md)：按迭代顺序整理训练改进思路、实现方法和当前推荐课程学习流程
+
 ## 输出目录约定
 
 `classic/` 会写入：

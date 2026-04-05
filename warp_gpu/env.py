@@ -43,9 +43,13 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         naconmax=128,  # 接触缓存上限会参与静态编译，过大时会明显拖慢首次启动。
         naccdmax=128,  # CCD 接触缓存控制连续碰撞检测的临时接触数量。
         njmax=64,
-        success_threshold=0.01,
-        torque_low=-10.0,
-        torque_high=10.0,
+        success_threshold=0.01,  # 全随机阶段使用的最终成功阈值。
+        stage1_success_threshold=0.05,  # 固定目标阶段成功阈值。
+        stage2_success_threshold=0.03,  # 小范围随机阶段成功阈值。
+        torque_low=-10.0,  # 真实扭矩下限；标准化动作会映射到这个范围。
+        torque_high=10.0,  # 真实扭矩上限；标准化动作会映射到这个范围。
+        action_target_scale=0.6,  # 标准化动作映射成目标扭矩时的缩放比例。
+        action_smoothing_alpha=0.75,  # 动作低通滤波系数，越大越平滑。
         fixed_gripper_ctrl=0.0,
         enable_gravity_motors=True,
         gravity_ctrl=-1.0,
@@ -62,6 +66,8 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         target_y_max=0.50,
         target_z_min=0.12,
         target_z_max=0.30,
+        target_sampling_mode="full_random",  # 目标采样模式：`full_random` / `small_random` / `fixed`。
+        target_range_scale=0.35,  # 小范围随机模式的目标范围缩放比例。
         fixed_target_x=None,
         fixed_target_y=None,
         fixed_target_z=None,
@@ -78,8 +84,8 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         idle_distance_threshold=0.08,
         idle_speed_threshold=0.015,
         idle_penalty_value=0.08,
-        phase_thresholds=(0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002),
-        phase_rewards=(100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0),
+        phase_thresholds=(1.6, 1.3, 1.0, 0.8, 0.6, 0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002),
+        phase_rewards=(20.0, 35.0, 50.0, 70.0, 90.0, 100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0),
         success_bonus=10000.0,
         success_remaining_step_gain=4.0,
         success_speed_bonus_very_slow=2000.0,
@@ -218,16 +224,21 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         )
 
     def _sample_target(self, rng: jax.Array) -> jax.Array:
-        if (
-            self._config.fixed_target_x is not None
-            and self._config.fixed_target_y is not None
-            and self._config.fixed_target_z is not None
-        ):
+        mode = str(self._config.target_sampling_mode).lower()
+        if mode == "fixed":
+            return self._target_center()
+        if mode == "small_random":
+            scale = float(np.clip(self._config.target_range_scale, 1e-3, 1.0))
+            center = self._target_center()
+            rx, ry, rz = jax.random.split(rng, 3)
+            x_half = 0.5 * float(self._config.target_x_max - self._config.target_x_min) * scale
+            y_half = 0.5 * float(self._config.target_y_max - self._config.target_y_min) * scale
+            z_half = 0.5 * float(self._config.target_z_max - self._config.target_z_min) * scale
             return jp.asarray(
                 [
-                    self._config.fixed_target_x,
-                    self._config.fixed_target_y,
-                    self._config.fixed_target_z,
+                    jax.random.uniform(rx, (), minval=center[0] - x_half, maxval=center[0] + x_half),
+                    jax.random.uniform(ry, (), minval=center[1] - y_half, maxval=center[1] + y_half),
+                    jax.random.uniform(rz, (), minval=center[2] - z_half, maxval=center[2] + z_half),
                 ],
                 dtype=jp.float32,
             )
@@ -246,6 +257,43 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             ],
             dtype=jp.float32,
         )
+
+    def _target_center(self) -> jax.Array:
+        """返回固定目标或采样空间中心点。"""
+        return jp.asarray(
+            [
+                self._config.fixed_target_x
+                if self._config.fixed_target_x is not None
+                else 0.5 * (self._config.target_x_min + self._config.target_x_max),
+                self._config.fixed_target_y
+                if self._config.fixed_target_y is not None
+                else 0.5 * (self._config.target_y_min + self._config.target_y_max),
+                self._config.fixed_target_z
+                if self._config.fixed_target_z is not None
+                else 0.5 * (self._config.target_z_min + self._config.target_z_max),
+            ],
+            dtype=jp.float32,
+        )
+
+    def _current_success_threshold(self) -> jax.Array:
+        """按目标采样模式返回当前成功判定阈值。"""
+        mode = str(self._config.target_sampling_mode).lower()
+        if mode == "fixed":
+            return jp.asarray(self._config.stage1_success_threshold, dtype=jp.float32)
+        if mode == "small_random":
+            return jp.asarray(self._config.stage2_success_threshold, dtype=jp.float32)
+        return jp.asarray(self._config.success_threshold, dtype=jp.float32)
+
+    def _scale_policy_action(self, action: jax.Array, prev_torque: jax.Array) -> jax.Array:
+        """把标准化动作映射成平滑后的真实扭矩。"""
+        action = jp.clip(action.astype(jp.float32), -1.0, 1.0)
+        target_scale = jp.asarray(np.clip(self._config.action_target_scale, 1e-3, 1.0), dtype=jp.float32)
+        positive_limit = jp.asarray(self._config.torque_high, dtype=jp.float32) * target_scale
+        negative_limit = jp.asarray(abs(self._config.torque_low), dtype=jp.float32) * target_scale
+        target_torque = jp.where(action >= 0.0, action * positive_limit, action * negative_limit)
+        smoothing_alpha = jp.asarray(np.clip(self._config.action_smoothing_alpha, 0.0, 0.999), dtype=jp.float32)
+        torque_cmd = smoothing_alpha * prev_torque + (1.0 - smoothing_alpha) * target_torque
+        return jp.clip(torque_cmd, self._config.torque_low, self._config.torque_high).astype(jp.float32)
 
     def _build_reset_qpos(self, target_pos: jax.Array) -> jax.Array:
         qpos = self._home_qpos
@@ -335,6 +383,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             "success": jp.asarray(0.0, dtype=jp.float32),
             "collision": jp.asarray(0.0, dtype=jp.float32),
             "runaway": jp.asarray(0.0, dtype=jp.float32),
+            "timeout": jp.asarray(0.0, dtype=jp.float32),
             "raw_collision_contacts": jp.asarray(0.0, dtype=jp.float32),
         }
         info = {
@@ -346,6 +395,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             "phase_hits": jp.zeros(len(self._config.phase_thresholds), dtype=jp.bool_),  # 用布尔向量记录阶段奖励是否已经发放。
             "prev_ee_pos": ee_pos,
             "task_step": jp.asarray(0, dtype=jp.int32),
+            "success_threshold": self._current_success_threshold(),
         }
         return mjx_env.State(
             data=data,
@@ -357,7 +407,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         )
 
     def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
-        torque_cmd = jp.clip(action, self._config.torque_low, self._config.torque_high).astype(jp.float32)  # 先按电机扭矩范围裁剪动作。
+        torque_cmd = self._scale_policy_action(action, state.info["prev_torque"])
         ctrl = self._compose_ctrl(torque_cmd)
         data = mjx_env.step(self.mjx_model, state.data, ctrl, self.n_substeps)
 
@@ -424,7 +474,8 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         collision = collision_contacts > 0
         reward -= self._config.collision_penalty_value * collision_contacts
 
-        success = distance <= self._config.success_threshold
+        current_success_threshold = self._current_success_threshold()
+        success = distance <= current_success_threshold
         remaining_steps = jp.maximum(jp.asarray(self._config.episode_length, dtype=jp.int32) - task_step, 0)
         reward += jp.where(success, self._config.success_bonus, 0.0)
         reward += jp.where(success, self._config.success_remaining_step_gain * remaining_steps.astype(jp.float32), 0.0)
@@ -451,7 +502,8 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         )
 
         nan_done = jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
-        done = jp.logical_or(jp.logical_or(success, collision), jp.logical_or(runaway, nan_done)).astype(jp.float32)  # 任一终止条件满足后结束回合。
+        timeout = task_step >= jp.asarray(self._config.episode_length, dtype=jp.int32)
+        done = jp.logical_or(jp.logical_or(success, collision), jp.logical_or(runaway, jp.logical_or(nan_done, timeout))).astype(jp.float32)  # 任一终止条件满足后结束回合。
 
         metrics = {
             **state.metrics,  # 保留包装器维护的统计项，避免评估阶段的 metrics 结构变化。
@@ -460,6 +512,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             "success": success.astype(jp.float32),
             "collision": collision.astype(jp.float32),
             "runaway": runaway.astype(jp.float32),
+            "timeout": timeout.astype(jp.float32),
             "raw_collision_contacts": raw_collision_contacts,
         }
         info = {
@@ -472,6 +525,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             "phase_hits": phase_hits,
             "prev_ee_pos": ee_pos,
             "task_step": task_step,
+            "success_threshold": current_success_threshold,
         }
         return mjx_env.State(data=data, obs=obs, reward=reward, done=done, metrics=metrics, info=info)
 
