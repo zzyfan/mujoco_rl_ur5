@@ -15,10 +15,7 @@ from brax.io import model as brax_model
 from brax.training.agents.ppo import train as ppo
 from brax.training.agents.sac import train as sac
 from mujoco_playground._src import wrapper
-try:
-    from tqdm.rich import tqdm
-except ImportError:
-    from tqdm.auto import tqdm
+from tqdm.auto import tqdm
 
 if __package__ in (None, ""):
     ROOT = Path(__file__).resolve().parents[1]
@@ -247,7 +244,8 @@ def _run_train(args: TrainArgs) -> int:
     )
 
     times = [time.monotonic()]  # 用于统计编译和训练耗时。
-    progress_bar = tqdm(total=max(int(args.num_timesteps), 1))
+    total_steps = max(int(args.num_timesteps), 1)
+    progress_bar = tqdm(total=total_steps, desc=f"{args.algo}:{args.robot}", unit="step")
     last_step = 0
     final_reward_label = ""
     final_reward_value: float | None = None
@@ -256,10 +254,11 @@ def _run_train(args: TrainArgs) -> int:
         nonlocal last_step, final_reward_label, final_reward_value
         times.append(time.monotonic())
         current_step = max(int(step), 0)
-        delta = max(current_step - last_step, 0)
+        visible_step = min(current_step, total_steps)  # 训练器可能按批次超出目标步数，进度条只显示到设定总步数。
+        delta = max(visible_step - last_step, 0)
         if delta:
             progress_bar.update(delta)
-        last_step = current_step
+        last_step = visible_step
         postfix: dict[str, str] = {}
         logged_metrics = _collect_logged_metrics(metrics)
         if "eval/episode_reward" in logged_metrics:
