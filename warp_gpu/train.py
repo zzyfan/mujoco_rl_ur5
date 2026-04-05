@@ -28,6 +28,39 @@ else:
     from .runtime import describe_warp_runtime, ensure_warp_runtime, playground_importable
 
 
+def _metric_to_float(value) -> float | None:
+    """把标量张量或普通数字转换成 Python float。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_logged_metrics(metrics: dict) -> dict[str, float]:
+    """从训练器回调字典里挑出最关键的可读指标。"""
+    preferred_keys = (
+        "eval/episode_reward",
+        "episode/sum_reward",
+        "eval/episode_length",
+        "eval/avg_episode_length",
+        "episode/length",
+        "eval/distance",
+        "episode/distance",
+        "eval/success",
+        "episode/success",
+        "eval/collision",
+        "episode/collision",
+    )
+    logged: dict[str, float] = {}
+    for key in preferred_keys:
+        if key not in metrics:
+            continue
+        value = _metric_to_float(metrics[key])
+        if value is not None:
+            logged[key] = value
+    return logged
+
+
 @dataclass
 class TrainArgs:
     algo: str = "ppo"  # Brax 训练器名称，可选 `ppo`、`sac`。
@@ -213,16 +246,40 @@ def _run_train(args: TrainArgs) -> int:
             progress_bar.update(delta)
         last_step = current_step
         postfix: dict[str, str] = {}
-        if "eval/episode_reward" in metrics:
+        logged_metrics = _collect_logged_metrics(metrics)
+        if "eval/episode_reward" in logged_metrics:
             final_reward_label = "最终评估回报"
-            final_reward_value = float(metrics["eval/episode_reward"])
+            final_reward_value = logged_metrics["eval/episode_reward"]
             postfix["eval_reward"] = f"{final_reward_value:.3f}"  # 评估奖励用于观察当前策略整回合表现。
-        elif "episode/sum_reward" in metrics:
+        elif "episode/sum_reward" in logged_metrics:
             final_reward_label = "最近训练回合回报"
-            final_reward_value = float(metrics["episode/sum_reward"])
+            final_reward_value = logged_metrics["episode/sum_reward"]
             postfix["train_reward"] = f"{final_reward_value:.3f}"  # 训练奖励用于观察采样阶段的即时表现。
+        if "eval/distance" in logged_metrics:
+            postfix["eval_distance"] = f"{logged_metrics['eval/distance']:.4f}"
+        elif "episode/distance" in logged_metrics:
+            postfix["train_distance"] = f"{logged_metrics['episode/distance']:.4f}"
+        if "eval/success" in logged_metrics:
+            postfix["eval_success"] = f"{logged_metrics['eval/success']:.2%}"
+        elif "episode/success" in logged_metrics:
+            postfix["train_success"] = f"{logged_metrics['episode/success']:.2%}"
+        if "eval/collision" in logged_metrics:
+            postfix["eval_collision"] = f"{logged_metrics['eval/collision']:.2%}"
+        elif "episode/collision" in logged_metrics:
+            postfix["train_collision"] = f"{logged_metrics['episode/collision']:.2%}"
         if postfix:
             progress_bar.set_postfix(postfix)
+        if logged_metrics:
+            summary_parts = [f"[训练日志] step={current_step}"]
+            for key, value in logged_metrics.items():
+                label = key.replace("/", "_")
+                if "success" in key or "collision" in key:
+                    summary_parts.append(f"{label}={value:.2%}")
+                elif "distance" in key:
+                    summary_parts.append(f"{label}={value:.4f}")
+                else:
+                    summary_parts.append(f"{label}={value:.3f}")
+            tqdm.write(" ".join(summary_parts))
 
     if args.algo == "ppo":
         train_fn = functools.partial(  # PPO 通过 rollout 收集样本后执行多轮策略更新。

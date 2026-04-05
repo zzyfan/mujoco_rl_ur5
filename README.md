@@ -97,6 +97,21 @@ python -m warp_gpu.train --algo ppo --robot ur5_cxy --num-envs 256
 python -m warp_gpu.train --algo sac --robot ur5_cxy --num-envs 16 --num-eval-envs 16
 ```
 
+## 训练日志
+
+`classic/` 和 `warp_gpu/` 现在都会在训练过程中打印阶段日志。
+
+- `classic/`：按时间步输出最近窗口内的 `recent_reward / recent_ep_len / recent_distance / success_rate / collision_rate`，若开启评估还会附带 `eval_reward`
+- `warp_gpu/`：除了进度条，还会打印 Brax 回调返回的关键指标，例如 `eval_episode_reward / episode_sum_reward / distance / success / collision`
+- 训练结束时两条线都会额外打印最后一次可用回报
+
+如果只想看新增日志，可以在服务器上配合：
+
+```bash
+tail -f classic_train.log
+tail -f warp_gpu_train.log
+```
+
 ## 常用命令
 
 训练 zero 机械臂：
@@ -190,6 +205,33 @@ models/warp_gpu/{algo}/{robot}/{run_name}/
 3. 需要恢复时使用 `--resume`
 4. 需要启用旧版速度读取时再加 `--legacy-zero-ee-velocity`
 5. 验收时用 `classic/test.py` 可视化
+
+## 服务器更新代码
+
+如果服务器本地没有手改文件，直接更新：
+
+```bash
+cd /home/zzyfan/mujoco_ur5_rl
+git pull --rebase origin main
+```
+
+如果服务器本地已经有改动，先暂存再更新：
+
+```bash
+cd /home/zzyfan/mujoco_ur5_rl
+git status
+git stash push -u -m "server-local-changes"
+git pull --rebase origin main
+git stash pop
+```
+
+更新后建议先做一次最小检查：
+
+```bash
+python -m py_compile classic/*.py warp_gpu/*.py
+python -m classic.test --random-policy --episodes 1 --max-steps 1 --no-render
+python -m warp_gpu.smoke --robot ur5_cxy --steps 1
+```
 
 ## 代码结构
 
