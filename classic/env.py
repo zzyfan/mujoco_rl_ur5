@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -782,22 +781,14 @@ class UR5MujocoEnv(gym.Env):
                 return None
 
         # 某些桌面/X11 场景下，窗口被关闭或 drawable 失效后继续 sync 可能触发 GLX 错误。
-        # 先判断 viewer 是否仍然存活，避免向失效窗口继续提交渲染命令。
+        # 这里只断开失效 viewer 的引用，不主动调用 `viewer.close()`，避免在销毁阶段再次触发 GLX 错误。
         if self.viewer is not None:
             is_running = getattr(self.viewer, "is_running", None)
             if callable(is_running):
                 try:
                     if not bool(is_running()):
-                        try:
-                            self.viewer.close()
-                        except Exception:
-                            pass
                         self.viewer = None
                 except Exception:
-                    try:
-                        self.viewer.close()
-                    except Exception:
-                        pass
                     self.viewer = None
 
         if self.viewer is None:
@@ -893,18 +884,9 @@ class UR5MujocoEnv(gym.Env):
     def close(self):
         """释放渲染资源。"""
         if self.viewer is not None:
-            viewer = self.viewer
+            # `human` viewer 在部分 GLX/X11 组合下主动 close 会直接抛 `GLXBadDrawable`。
+            # 测试/脚本退出时只清空引用，交给解释器和窗口系统回收更稳。
             self.viewer = None
-            # 某些驱动或 GLX 组合下 `viewer.close()` 可能阻塞，因此改成异步关闭。
-            def _close_viewer():
-                try:
-                    viewer.close()
-                except Exception:
-                    pass
-
-            t = threading.Thread(target=_close_viewer, daemon=True)
-            t.start()
-            t.join(timeout=0.5)
         if self.renderer is not None:
             try:
                 self.renderer.close()

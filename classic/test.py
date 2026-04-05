@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -157,6 +158,12 @@ def main():
         if env is not None:
             env.close()
     print("测试完成。")
+    if args.render and args.render_mode == "human":
+        # 某些 GLX/X11 组合在解释器回收 viewer 对象时会触发 `GLXBadDrawable`。
+        # 测试脚本到这里已经完成推理输出，直接退出进程可以避免卡在窗口销毁阶段。
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
 
 if __name__ == "__main__":
