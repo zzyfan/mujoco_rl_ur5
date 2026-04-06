@@ -50,6 +50,10 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         torque_high=10.0,  # 真实扭矩上限；标准化动作会映射到这个范围。
         action_target_scale=0.6,  # 标准化动作映射成目标扭矩时的缩放比例。
         action_smoothing_alpha=0.75,  # 动作低通滤波系数，越大越平滑。
+        controller_mode="torque",  # 控制模式：`torque` 或 `joint_position_delta`。
+        joint_position_delta_scale=0.08,  # `joint_position_delta` 模式下每步允许的关节目标增量。
+        position_control_kp=45.0,  # 位置控制模式比例增益。
+        position_control_kd=3.0,  # 位置控制模式阻尼增益。
         fixed_gripper_ctrl=0.0,
         enable_gravity_motors=True,
         gravity_ctrl=-1.0,
@@ -167,6 +171,8 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         self._phase_thresholds = jp.asarray(self._config.phase_thresholds, dtype=jp.float32)
         self._phase_rewards = jp.asarray(self._config.phase_rewards, dtype=jp.float32)
         self._identity_quat = jp.asarray([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)
+        self._arm_joint_low = jp.asarray(self.mj_model.jnt_range[self._arm_joint_ids, 0], dtype=jp.float32)
+        self._arm_joint_high = jp.asarray(self.mj_model.jnt_range[self._arm_joint_ids, 1], dtype=jp.float32)
         self._geom_body_ids = jp.asarray(np.asarray(self.mj_model.geom_bodyid, dtype=np.int32))
         self._robot_body_mask = jp.asarray(self._build_robot_body_mask(), dtype=jp.bool_)
         self._ignored_contact_geom_mask = jp.asarray(self._build_ignored_contact_geom_mask(), dtype=jp.bool_)
@@ -295,6 +301,43 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         torque_cmd = smoothing_alpha * prev_torque + (1.0 - smoothing_alpha) * target_torque
         return jp.clip(torque_cmd, self._config.torque_low, self._config.torque_high).astype(jp.float32)
 
+    def _compute_position_delta_torque(
+        self,
+        action: jax.Array,
+        prev_torque: jax.Array,
+        prev_target_joint_pos: jax.Array,
+        joint_pos: jax.Array,
+        joint_vel: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        """把动作解释成关节目标增量，再转换成平滑扭矩。"""
+        action = jp.clip(action.astype(jp.float32), -1.0, 1.0)
+        delta_scale = jp.asarray(max(float(self._config.joint_position_delta_scale), 1e-4), dtype=jp.float32)
+        desired_joint_pos = jp.clip(
+            prev_target_joint_pos + action * delta_scale,
+            self._arm_joint_low,
+            self._arm_joint_high,
+        )
+        kp = jp.asarray(float(self._config.position_control_kp), dtype=jp.float32)
+        kd = jp.asarray(float(self._config.position_control_kd), dtype=jp.float32)
+        target_torque = kp * (desired_joint_pos - joint_pos) - kd * joint_vel
+        smoothing_alpha = jp.asarray(np.clip(self._config.action_smoothing_alpha, 0.0, 0.999), dtype=jp.float32)
+        torque_cmd = smoothing_alpha * prev_torque + (1.0 - smoothing_alpha) * target_torque
+        torque_cmd = jp.clip(torque_cmd, self._config.torque_low, self._config.torque_high).astype(jp.float32)
+        return torque_cmd, desired_joint_pos.astype(jp.float32)
+
+    def _compute_action_torque(
+        self,
+        action: jax.Array,
+        prev_torque: jax.Array,
+        prev_target_joint_pos: jax.Array,
+        joint_pos: jax.Array,
+        joint_vel: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        """按控制模式把策略动作映射成真实扭矩。"""
+        if str(self._config.controller_mode).lower() == "joint_position_delta":
+            return self._compute_position_delta_torque(action, prev_torque, prev_target_joint_pos, joint_pos, joint_vel)
+        return self._scale_policy_action(action, prev_torque), prev_target_joint_pos
+
     def _build_reset_qpos(self, target_pos: jax.Array) -> jax.Array:
         qpos = self._home_qpos
         qpos = qpos.at[self._arm_qpos_adr].set(self._home_arm_pose())
@@ -390,6 +433,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             "rng": rng,
             "prev_torque": self._zero_action,
             "prev_joint_vel": jp.zeros(6, dtype=jp.float32),
+            "prev_target_joint_pos": qpos[self._arm_qpos_adr],
             "prev_distance": distance,
             "min_distance": distance,
             "phase_hits": jp.zeros(len(self._config.phase_thresholds), dtype=jp.bool_),  # 用布尔向量记录阶段奖励是否已经发放。
@@ -408,7 +452,15 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         )
 
     def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
-        torque_cmd = self._scale_policy_action(action, state.info["prev_torque"])
+        current_joint_pos = state.data.qpos[self._arm_qpos_adr]
+        current_joint_vel = state.data.qvel[self._arm_qvel_adr]
+        torque_cmd, next_target_joint_pos = self._compute_action_torque(
+            action,
+            state.info["prev_torque"],
+            state.info["prev_target_joint_pos"],
+            current_joint_pos,
+            current_joint_vel,
+        )
         ctrl = self._compose_ctrl(torque_cmd)
         data = mjx_env.step(self.mjx_model, state.data, ctrl, self.n_substeps)
 
@@ -517,6 +569,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             "rng": state.info["rng"],
             "prev_torque": torque_cmd,
             "prev_joint_vel": joint_vel,
+            "prev_target_joint_pos": next_target_joint_pos,
             "prev_distance": distance,
             "min_distance": next_min_distance,
             "phase_hits": phase_hits,

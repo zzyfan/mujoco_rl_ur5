@@ -100,6 +100,10 @@ class TrainArgs:
     target_range_scale: float = 0.35  # 小范围随机模式的目标范围缩放比例。
     action_target_scale: float = 0.6  # 标准化动作缩放成目标扭矩的比例。
     action_smoothing_alpha: float = 0.75  # 动作低通滤波系数。
+    controller_mode: str = "torque"  # 控制模式：`torque` 或 `joint_position_delta`。
+    joint_position_delta_scale: float = 0.08  # 位置增量控制时每步允许的关节目标增量。
+    position_control_kp: float = 45.0  # 位置控制比例增益。
+    position_control_kd: float = 3.0  # 位置控制阻尼增益。
     logdir: str = "logs/warp_gpu"  # 文本日志输出目录。
     model_dir: str = "models/warp_gpu"  # 配置、checkpoint 和最终参数目录。
     run_name: str = "ur5_reach_warp_gpu"  # 当前实验名称。
@@ -144,6 +148,10 @@ def _parse_args() -> TrainArgs:
     p.add_argument("--target-range-scale", type=float, default=0.35)  # 小范围随机模式下的范围缩放。
     p.add_argument("--action-target-scale", type=float, default=0.6)  # 标准化动作缩放比例。
     p.add_argument("--action-smoothing-alpha", type=float, default=0.75)  # 动作滤波系数。
+    p.add_argument("--controller-mode", choices=["torque", "joint_position_delta"], default="torque")  # 控制接口类型。
+    p.add_argument("--joint-position-delta-scale", type=float, default=0.08)  # 位置增量控制每步允许的目标增量。
+    p.add_argument("--position-control-kp", type=float, default=45.0)  # 位置控制比例增益。
+    p.add_argument("--position-control-kd", type=float, default=3.0)  # 位置控制阻尼增益。
     p.add_argument("--logdir", type=str, default="logs/warp_gpu")  # 日志目录。
     p.add_argument("--model-dir", type=str, default="models/warp_gpu")  # 配置和模型输出目录。
     p.add_argument("--run-name", type=str, default="ur5_reach_warp_gpu")  # 当前实验名称。
@@ -186,6 +194,10 @@ def _parse_args() -> TrainArgs:
         target_range_scale=ns.target_range_scale,
         action_target_scale=ns.action_target_scale,
         action_smoothing_alpha=ns.action_smoothing_alpha,
+        controller_mode=ns.controller_mode,
+        joint_position_delta_scale=ns.joint_position_delta_scale,
+        position_control_kp=ns.position_control_kp,
+        position_control_kd=ns.position_control_kd,
         logdir=ns.logdir,
         model_dir=ns.model_dir,
         run_name=ns.run_name,
@@ -211,6 +223,10 @@ def _build_env_config(args: TrainArgs):
     cfg.target_range_scale = float(args.target_range_scale)  # 小范围随机模式的范围缩放比例。
     cfg.action_target_scale = float(args.action_target_scale)  # 标准化动作缩放比例。
     cfg.action_smoothing_alpha = float(args.action_smoothing_alpha)  # 动作滤波系数。
+    cfg.controller_mode = str(args.controller_mode)  # 控制接口类型。
+    cfg.joint_position_delta_scale = float(args.joint_position_delta_scale)  # 位置增量控制每步的目标增量。
+    cfg.position_control_kp = float(args.position_control_kp)  # 位置控制比例增益。
+    cfg.position_control_kd = float(args.position_control_kd)  # 位置控制阻尼增益。
     cfg.fixed_target_x = args.fixed_target_x  # 固定目标点 x。
     cfg.fixed_target_y = args.fixed_target_y  # 固定目标点 y。
     cfg.fixed_target_z = args.fixed_target_z  # 固定目标点 z。

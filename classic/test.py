@@ -58,6 +58,12 @@ def parse_args():
     parser.set_defaults(render=False)
     parser.add_argument("--render-mode", choices=["human", "rgb_array"], default="human")  # `human` 适合看动作，`rgb_array` 适合录制。
     parser.add_argument("--render-sleep", type=float, default=0.05)  # `human` 模式每步额外暂停多久；调大后更容易看清失败过程。
+    parser.add_argument("--controller-mode", choices=["torque", "joint_position_delta"], default="torque")  # 控制接口类型。
+    parser.add_argument("--joint-position-delta-scale", type=float, default=0.08)  # 位置增量控制每步允许的关节目标增量。
+    parser.add_argument("--position-control-kp", type=float, default=45.0)  # 位置控制比例增益。
+    parser.add_argument("--position-control-kd", type=float, default=3.0)  # 位置控制阻尼增益。
+    parser.add_argument("--goal-conditioned", action="store_true")  # 测试 goal-conditioned / HER 模型时启用。
+    parser.add_argument("--reward-mode", choices=["dense", "sparse"], default="dense")  # 奖励模式要与训练时一致。
     parser.add_argument("--random-policy", action="store_true", help="不加载模型，使用随机动作测试环境")  # 用来确认环境本身没坏。
     parser.add_argument("--print-step-reward", action="store_true", help="打印每一步奖励与关键信息")
     parser.add_argument("--print-reward-info", action="store_true", help="打印环境 info 里的奖励分项（若存在）")
@@ -100,6 +106,12 @@ def main():
         fixed_target_x=args.fixed_target_x,
         fixed_target_y=args.fixed_target_y,
         fixed_target_z=args.fixed_target_z,
+        controller_mode=args.controller_mode,
+        joint_position_delta_scale=args.joint_position_delta_scale,
+        position_control_kp=args.position_control_kp,
+        position_control_kd=args.position_control_kd,
+        goal_conditioned=bool(args.goal_conditioned),
+        reward_mode=args.reward_mode,
     )
 
     env = None

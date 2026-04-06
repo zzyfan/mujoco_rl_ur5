@@ -231,3 +231,65 @@
 - `HER` 作为 reach 任务强基线
 - 比纯扭矩更容易学的控制模式（例如 `joint position delta`）
 - 更清晰的 `done_reason` / success 指标输出
+
+## 版本 10：goal-conditioned、HER 与更容易学的控制接口
+
+目标：
+- 吸收 `panda-gym`、`Gymnasium-Robotics`、`rl-baselines3-zoo` 和 `homestri-ur5e-rl` 这些项目里最值得借鉴的主线设计。
+- 不再只靠 dense reward 和直接扭矩控制硬学 reach。
+
+实现：
+
+### 1. classic goal-conditioned 环境
+
+在 [classic/env.py](/home/zzyfan/mujoco_ur5_rl/classic/env.py) 中新增可选的 goal-conditioned 观测结构：
+
+- `observation`
+- `achieved_goal`
+- `desired_goal`
+
+并补上 `compute_reward()`，满足 SB3 `HER` 对 goal-conditioned 环境的接口要求。
+
+### 2. classic HER
+
+在 [classic/train.py](/home/zzyfan/mujoco_ur5_rl/classic/train.py) 中新增：
+
+- `--goal-conditioned`
+- `--use-her`
+- `--her-goal-selection-strategy`
+- `--her-n-sampled-goal`
+- `--reward-mode sparse`
+
+说明：
+- 目前 `HER` 只接到 `classic` 的 `SAC / TD3`。
+- 启用 `HER` 时会自动切到：
+  - `goal_conditioned=True`
+  - `reward_mode=sparse`
+
+### 3. 更容易学的控制接口
+
+在 [classic/env.py](/home/zzyfan/mujoco_ur5_rl/classic/env.py) 和 [warp_gpu/env.py](/home/zzyfan/mujoco_ur5_rl/warp_gpu/env.py) 中新增：
+
+- `controller_mode=torque`
+- `controller_mode=joint_position_delta`
+
+其中 `joint_position_delta` 的实现方式是：
+- 动作表示“下一步的关节目标增量”
+- 环境内部再通过简单的 PD 形式转换成真实扭矩
+
+作用：
+- 保留 torque 控制作对照
+- 同时提供一个更容易学、对 reach 任务更友好的控制接口
+
+### 4. 日志与测试诊断进一步加强
+
+- 训练日志新增 `done_reasons=...`
+- 测试脚本支持：
+  - 固定目标点
+  - 慢速渲染
+  - `done_reason`
+  - goal-conditioned 模型推理参数
+
+作用：
+- 更快判断“为什么没成功”
+- 更容易验证 curriculum / HER / 控制接口是否真正改善了首次成功率

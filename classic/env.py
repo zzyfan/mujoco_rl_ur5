@@ -99,6 +99,12 @@ class MujocoEnvConfig:
     torque_high: float = 10.0  # 扭矩上限；实际控制量会由标准化动作缩放到这个范围。
     action_target_scale: float = 0.6  # 标准化动作到目标扭矩的缩放比例；越小越保守。
     action_smoothing_alpha: float = 0.75  # 动作滤波系数；越大越依赖上一时刻扭矩。
+    controller_mode: str = "torque"  # 控制模式：`torque` 或 `joint_position_delta`。
+    joint_position_delta_scale: float = 0.08  # `joint_position_delta` 模式下，每步允许的关节目标增量（弧度）。
+    position_control_kp: float = 45.0  # 位置控制模式的比例增益。
+    position_control_kd: float = 3.0  # 位置控制模式的阻尼增益。
+    goal_conditioned: bool = False  # 是否输出 `observation/achieved_goal/desired_goal` 结构。
+    reward_mode: str = "dense"  # 奖励模式：`dense` 或 `sparse`。
     # 到点任务默认保持夹爪打开。
     fixed_gripper_ctrl: float = 0.0
     enable_gravity_motors: bool = True  # 是否向重力补偿电机写入固定控制量。
@@ -251,16 +257,28 @@ class UR5MujocoEnv(gym.Env):
             low=np.full((6,), -1.0, dtype=np.float32),
             high=np.full((6,), 1.0, dtype=np.float32),
             dtype=np.float32,
-        )  # 策略始终输出标准化动作，环境再把它映射成真实扭矩。
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(24,), dtype=np.float32)  # 24 维布局要和训练好的策略完全匹配。
+        )  # 策略始终输出标准化动作，环境再把它映射成真实控制量。
+        if self.config.goal_conditioned:
+            self.observation_space = spaces.Dict(
+                {
+                    "observation": spaces.Box(low=-np.inf, high=np.inf, shape=(24,), dtype=np.float32),
+                    "achieved_goal": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
+                    "desired_goal": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32),
+                }
+            )  # goal-conditioned 结构对齐 Panda Gym / Gymnasium-Robotics 的 reach 任务接口。
+        else:
+            self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(24,), dtype=np.float32)  # 24 维布局要和训练好的策略完全匹配。
 
         mujoco.mj_forward(self.model, self.data)
         self.home_qpos = self.data.qpos.copy()
         self.home_qvel = self.data.qvel.copy()  # reset 先回这个快照，再叠加机械臂初始姿态和目标点。
+        self.arm_joint_low = self.model.jnt_range[self.arm_joint_ids, 0].copy().astype(np.float32)
+        self.arm_joint_high = self.model.jnt_range[self.arm_joint_ids, 1].copy().astype(np.float32)
 
         self.target_pos = np.zeros(3, dtype=np.float32)
         self.prev_torque = np.zeros(6, dtype=np.float32)
         self.prev_joint_vel = np.zeros(6, dtype=np.float32)
+        self.prev_target_joint_pos = np.zeros(6, dtype=np.float32)
         self._warp_qpos: Optional[np.ndarray] = None
         self._warp_qvel: Optional[np.ndarray] = None
         self._warp_xpos: Optional[np.ndarray] = None
@@ -423,6 +441,42 @@ class UR5MujocoEnv(gym.Env):
         torque_cmd = smoothing_alpha * self.prev_torque + (1.0 - smoothing_alpha) * target_torque
         return np.clip(torque_cmd, torque_low, torque_high).astype(np.float32)
 
+    def _compute_position_delta_torque(
+        self,
+        action: np.ndarray,
+        joint_pos: np.ndarray,
+        joint_vel: np.ndarray,
+    ) -> np.ndarray:
+        """把标准化动作解释成关节目标增量，再用 PD 形式转成扭矩。
+
+        这类接口比直接扭矩更容易学，吸收了多个机器人 RL 项目中
+        “先用位置/速度型控制拿到第一次成功”的经验。
+        """
+        action = np.asarray(action, dtype=np.float32).reshape(6)
+        action = np.clip(action, -1.0, 1.0)
+        delta_scale = float(max(self.config.joint_position_delta_scale, 1e-4))
+        desired_joint_pos = self.prev_target_joint_pos + action * delta_scale
+        desired_joint_pos = np.clip(desired_joint_pos, self.arm_joint_low, self.arm_joint_high).astype(np.float32)
+        self.prev_target_joint_pos[:] = desired_joint_pos
+
+        kp = float(max(self.config.position_control_kp, 0.0))
+        kd = float(max(self.config.position_control_kd, 0.0))
+        target_torque = kp * (desired_joint_pos - joint_pos) - kd * joint_vel
+        smoothing_alpha = float(np.clip(self.config.action_smoothing_alpha, 0.0, 0.999))
+        torque_cmd = smoothing_alpha * self.prev_torque + (1.0 - smoothing_alpha) * target_torque.astype(np.float32)
+        return np.clip(torque_cmd, float(self.config.torque_low), float(self.config.torque_high)).astype(np.float32)
+
+    def _compute_action_torque(
+        self,
+        action: np.ndarray,
+        joint_pos: np.ndarray,
+        joint_vel: np.ndarray,
+    ) -> np.ndarray:
+        """根据控制模式把策略动作映射成真实扭矩。"""
+        if self.config.controller_mode == "joint_position_delta":
+            return self._compute_position_delta_torque(action, joint_pos, joint_vel)
+        return self._scale_policy_action(action)
+
     def _get_ee_pos(self) -> np.ndarray:
         """读取夹爪两指中心点的位置。"""
         if self.physics_backend == "warp" and self._warp_xpos is not None:
@@ -518,21 +572,53 @@ class UR5MujocoEnv(gym.Env):
             return self._get_legacy_ee_vel()
         return self.current_ee_vel.copy().astype(np.float32)
 
-    def _get_obs(self) -> np.ndarray:
-        """组装 24 维观测向量。"""
-        ee_pos = self._get_ee_pos()
-        target_pos = self._get_target_pos()
-        relative_pos = target_pos - ee_pos
+    def _get_joint_state(self) -> tuple[np.ndarray, np.ndarray]:
+        """读取当前关节角和关节速度。"""
         if self.physics_backend == "warp" and self._warp_qpos is not None and self._warp_qvel is not None:
             joint_pos = self._warp_qpos[self.arm_qpos_adr].copy().astype(np.float32)
             joint_vel = self._warp_qvel[self.arm_qvel_adr].copy().astype(np.float32)
         else:
             joint_pos = self.data.qpos[self.arm_qpos_adr].copy().astype(np.float32)
             joint_vel = self.data.qvel[self.arm_qvel_adr].copy().astype(np.float32)
+        return joint_pos, joint_vel
+
+    def _format_observation(self, observation: np.ndarray, achieved_goal: np.ndarray, desired_goal: np.ndarray):
+        """按是否启用 goal-conditioned 接口组织观测。"""
+        if not self.config.goal_conditioned:
+            return observation.astype(np.float32)
+        return {
+            "observation": observation.astype(np.float32),
+            "achieved_goal": achieved_goal.astype(np.float32),
+            "desired_goal": desired_goal.astype(np.float32),
+        }
+
+    def _get_obs(self) -> np.ndarray:
+        """组装 24 维观测向量。"""
+        ee_pos = self._get_ee_pos()
+        target_pos = self._get_target_pos()
+        relative_pos = target_pos - ee_pos
+        joint_pos, joint_vel = self._get_joint_state()
         ee_vel = self._get_ee_vel(ee_pos)
-        # Gym/SB3 约定观测必须是 numpy 数组；
-        # 统一为 float32 可以减少训练时 dtype 转换开销。
-        return np.concatenate([relative_pos, joint_pos, joint_vel, self.prev_torque, ee_vel]).astype(np.float32)
+        base_obs = np.concatenate([relative_pos, joint_pos, joint_vel, self.prev_torque, ee_vel]).astype(np.float32)
+        return self._format_observation(base_obs, ee_pos, target_pos)
+
+    def compute_reward(self, achieved_goal, desired_goal, info):
+        """为 goal-conditioned / HER 环境提供标准奖励接口。"""
+        achieved_goal = np.asarray(achieved_goal, dtype=np.float32)
+        desired_goal = np.asarray(desired_goal, dtype=np.float32)
+        distance = np.linalg.norm(achieved_goal - desired_goal, axis=-1)
+
+        threshold = float(self.config.success_threshold)
+        if isinstance(info, dict) and "success_threshold" in info:
+            threshold = float(info["success_threshold"])
+        elif isinstance(info, (list, tuple)) and len(info) > 0:
+            sample = info[0]
+            if isinstance(sample, dict) and "success_threshold" in sample:
+                threshold = float(sample["success_threshold"])
+
+        if self.config.reward_mode == "sparse":
+            return np.where(distance <= threshold, 0.0, -1.0).astype(np.float32)
+        return (-distance).astype(np.float32)
 
     def _sync_warp_cache(self) -> None:
         """只拉取观测与奖励所需的小数组，减少 host<->device 往返。"""
@@ -584,6 +670,7 @@ class UR5MujocoEnv(gym.Env):
         # 到点任务：夹爪固定为张开值。
         self.data.ctrl[self.gripper_actuator_ids] = float(self.config.fixed_gripper_ctrl)
         self.prev_torque[:] = self.data.ctrl[self.arm_actuator_ids].astype(np.float32)
+        self.prev_target_joint_pos[:] = self.data.qpos[self.arm_qpos_adr].astype(np.float32)
 
         # Gymnasium reset 返回 `(obs, info)`。
         # info 里保存距离、成功标记和课程阶段等额外状态。
@@ -601,6 +688,8 @@ class UR5MujocoEnv(gym.Env):
             "success_threshold": self._current_success_threshold(),
             "physics_backend": self.physics_backend,
             "done_reason": "reset",
+            "achieved_goal": self.prev_ee_pos.copy() if self.prev_ee_pos is not None else self._get_ee_pos(),
+            "desired_goal": self.target_pos.copy(),
         }
         # 课程计数器在 episode 初始化完成后 +1。
         self.episode_count += 1
@@ -617,7 +706,8 @@ class UR5MujocoEnv(gym.Env):
             self.prev_joint_vel = self.data.qvel[self.arm_qvel_adr].copy().astype(np.float32)
 
         # 1) 动作清洗与限幅。
-        torque_cmd = self._scale_policy_action(action)
+        current_joint_pos, current_joint_vel = self._get_joint_state()
+        torque_cmd = self._compute_action_torque(action, current_joint_pos, current_joint_vel)
 
         # 2) 执行扭矩控制。
         # 注意：这一步是“策略输出 -> 物理引擎控制输入”的关键桥梁。
@@ -651,9 +741,10 @@ class UR5MujocoEnv(gym.Env):
                 self.current_ee_vel = ((ee_pos - self.prev_ee_pos) / dt).astype(np.float32)
         self.prev_ee_pos = ee_pos.copy()
         obs = self._get_obs()
-        relative_pos = obs[0:3]
-        joint_vel = obs[9:15]
-        ee_vel = obs[21:24]
+        base_obs = obs["observation"] if isinstance(obs, dict) else obs
+        relative_pos = base_obs[0:3]
+        joint_vel = base_obs[9:15]
+        ee_vel = base_obs[21:24]
 
         distance = float(np.linalg.norm(relative_pos))
         ee_speed = float(np.linalg.norm(ee_vel))
@@ -763,6 +854,9 @@ class UR5MujocoEnv(gym.Env):
         elif timeout:
             done_reason = "timeout"
 
+        if self.config.reward_mode == "sparse":
+            reward = float(self.compute_reward(ee_pos, self.target_pos, {"success_threshold": current_success_threshold}))
+
         info = {
             "distance": distance,
             "success": success,
@@ -778,6 +872,8 @@ class UR5MujocoEnv(gym.Env):
             "episode_index": int(self.episode_count),
             "success_threshold": current_success_threshold,
             "done_reason": done_reason,
+            "achieved_goal": ee_pos.copy(),
+            "desired_goal": self.target_pos.copy(),
             "reward_info": {
                 "step_penalty": -float(self.config.step_penalty),
                 "improvement_reward": improvement_reward,
@@ -798,6 +894,8 @@ class UR5MujocoEnv(gym.Env):
                 "collision_remaining_step_penalty": collision_remaining_step_penalty,
                 "raw_collision_contacts": raw_collision_contacts,
                 "success_threshold": current_success_threshold,
+                "reward_mode": self.config.reward_mode,
+                "controller_mode": self.config.controller_mode,
             },
         }
         return obs, float(reward), terminated, truncated, info

@@ -56,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fixed-target-x", type=float, default=None)  # 固定目标点 x，便于稳定观察策略表现。
     p.add_argument("--fixed-target-y", type=float, default=None)  # 固定目标点 y。
     p.add_argument("--fixed-target-z", type=float, default=None)  # 固定目标点 z。
+    p.add_argument("--controller-mode", choices=["torque", "joint_position_delta"], default="torque")  # 控制接口类型。
+    p.add_argument("--joint-position-delta-scale", type=float, default=0.08)  # 位置增量控制每步允许的目标增量。
+    p.add_argument("--position-control-kp", type=float, default=45.0)  # 位置控制比例增益。
+    p.add_argument("--position-control-kd", type=float, default=3.0)  # 位置控制阻尼增益。
     p.add_argument("--render", action="store_true")  # 打开可视化窗口，便于肉眼观察策略动作。
     p.add_argument("--no-render", action="store_false", dest="render")  # 显式关闭渲染。
     p.set_defaults(render=False)
@@ -259,6 +263,10 @@ def main() -> None:
     cfg.fixed_target_x = args.fixed_target_x  # 固定目标点有利于横向比较不同策略输出。
     cfg.fixed_target_y = args.fixed_target_y
     cfg.fixed_target_z = args.fixed_target_z
+    cfg.controller_mode = args.controller_mode
+    cfg.joint_position_delta_scale = float(args.joint_position_delta_scale)
+    cfg.position_control_kp = float(args.position_control_kp)
+    cfg.position_control_kd = float(args.position_control_kd)
 
     env = UR5ReachWarpEnv(config=cfg)
     if args.artifact == "final":

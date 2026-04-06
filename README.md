@@ -13,6 +13,7 @@
 补充文档：
 
 - [训练改进记录](/home/zzyfan/mujoco_ur5_rl/docs/TRAINING_IMPROVEMENTS.md)
+- [更新日志](/home/zzyfan/mujoco_ur5_rl/docs/UPDATE_LOG.md)
 
 ## 快速开始
 
@@ -86,6 +87,9 @@ python classic/test.py \
 
 - 支持课程学习
 - 支持“固定目标 -> 小范围随机 -> 全范围随机”的自动课程学习
+- 支持 `goal-conditioned` 观测结构，可直接对接 `HER`
+- 支持 `dense / sparse` 两种奖励模式
+- 支持 `torque / joint_position_delta` 两种控制接口
 - 支持 `VecNormalize`
 - 支持 `best_model / final / interrupted`
 - 支持 `zero_robotiq` 机器人参数
@@ -140,6 +144,7 @@ python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --epi
 - 训练结束时两条线都会额外打印最后一次可用回报
 - `collision_rate` 现在对应“过滤后的危险碰撞率”；若需要对照原始 MuJoCo 接触数，可查看 `info['raw_collision_contacts']`
 - `runaway_rate` 现在表示“回合内曾出现明显发散迹象的比例”，用于诊断而不是直接判失败
+- `classic/` 现在还会按最近回合输出 `done_reasons=...` 汇总，方便区分 success / collision / timeout
 
 如果只想看新增日志，可以在服务器上配合：
 
@@ -185,6 +190,22 @@ python classic/test.py \
   --norm-path logs/classic/sac/ur5_cxy/exp_sac/best_model/vec_normalize.pkl \
   --episodes 3 \
   --render
+```
+
+启用 goal-conditioned + HER 的 classic SAC：
+
+```bash
+python classic/train.py \
+  --algo sac \
+  --robot ur5_cxy \
+  --run-name exp_sac_her \
+  --goal-conditioned \
+  --use-her \
+  --reward-mode sparse \
+  --controller-mode joint_position_delta \
+  --timesteps 500000 \
+  --device cuda \
+  --no-render
 ```
 
 启用旧版末端速度读取：

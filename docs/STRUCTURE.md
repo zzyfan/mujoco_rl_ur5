@@ -53,6 +53,7 @@
 ## 文档
 
 - [TRAINING_IMPROVEMENTS.md](/home/zzyfan/mujoco_ur5_rl/docs/TRAINING_IMPROVEMENTS.md)：按迭代顺序整理训练改进思路、实现方法和当前推荐课程学习流程
+- [UPDATE_LOG.md](/home/zzyfan/mujoco_ur5_rl/docs/UPDATE_LOG.md)：按时间顺序汇总已经完成的实现变化
 
 ## 输出目录约定
 
