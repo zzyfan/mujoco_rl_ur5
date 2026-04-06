@@ -107,3 +107,27 @@
   - 默认按“全部产物齐了再统一回传”模式工作
 - 如需兼容旧版平铺下载结构，可继续使用：
   - `--layout artifact`
+
+## 2026-04 当前阶段继续收口：三线职责重构 + SBX 实验线
+
+- 训练线职责重新定义：
+  - `classic` = 成功率主线
+  - `warp_gpu` = GPU 高吞吐验证线
+  - `sbx_runner` = JAX 算法层实验线
+- 新增：
+  - [sbx_runner/train.py](/home/zzyfan/mujoco_ur5_rl/sbx_runner/train.py)
+  - [server_scripts/run_warp_validation_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_warp_validation_queue.sh)
+  - [server_scripts/run_classic_success_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_classic_success_queue.sh)
+  - [server_scripts/run_sbx_experiment.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_sbx_experiment.sh)
+  - [server_scripts/start_total_queue_screen.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/start_total_queue_screen.sh)
+  - [server_scripts/start_warp_validation_screen.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/start_warp_validation_screen.sh)
+  - [server_scripts/start_classic_success_screen.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/start_classic_success_screen.sh)
+  - [server_scripts/start_sbx_experiment_screen.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/start_sbx_experiment_screen.sh)
+  - [scripts/install_sbx_env.sh](/home/zzyfan/mujoco_ur5_rl/scripts/install_sbx_env.sh)
+- `run_total_queue.sh` 现在只做总调度，不再内嵌所有命令细节。
+- `auto_fetch_remote_models.py` 新增预设：
+  - `warp_validation_queue`
+  - `classic_success_queue`
+  - `sbx_experiment`
+- `requirements.txt` 新增 `sbx-rl`
+- `warp_gpu/train.py` 的进度条回到普通 `tqdm`，避免 `rich` 清理阶段的退出噪声

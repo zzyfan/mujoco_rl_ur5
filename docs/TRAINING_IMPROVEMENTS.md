@@ -203,6 +203,82 @@
 - 总队列训练建议使用单独 logfile，避免不同算法输出混写
 - `warp` 的固定文本进度展示可以继续替代动态条，方便服务器日志查看
 
+## 版本 11：三线职责重构
+
+目标：
+- 不再让 `classic`、`warp` 和未来的 JAX 算法实验混在同一套职责里。
+- 参考 `Gymnasium-Robotics`、`panda_mujoco_gym`、`rl-baselines3-zoo`、`homestri-ur5e-rl` 和 `MuJoCo_RL_UR5` 的共同点，把训练线重新收成“成功率主线 / 高吞吐验证线 / 算法层实验线”。
+
+实现：
+
+### 1. classic = 成功率主线
+
+- 保留：
+  - `goal-conditioned`
+  - `sparse reward`
+  - `HER`
+  - `joint_position_delta`
+  - curriculum
+- 队列脚本默认把 `classic` 放在 CPU：
+  - `server_scripts/run_classic_success_queue.sh`
+
+原因：
+- 经过实测，`classic + HER` 很容易被 MuJoCo CPU step、SubprocVecEnv 和 HER 回放重标记压成 CPU / IPC 瓶颈。
+- 把 GPU 留给 `warp` 更划算。
+
+### 2. warp = GPU 高吞吐验证线
+
+- 保留：
+  - `joint_position_delta`
+  - `sparse reward`
+  - 分阶段目标采样
+  - success / timeout 主导日志
+- 暂不强塞：
+  - `HER`
+  - `SB3 MultiInputPolicy`
+
+原因：
+- `warp` 的价值在于 GPU-native 高吞吐，不是照抄 `classic` 的整套 SB3 栈。
+
+### 3. SBX = 算法层实验线
+
+新增：
+- [sbx_runner/train.py](/home/zzyfan/mujoco_ur5_rl/sbx_runner/train.py)
+- [server_scripts/run_sbx_experiment.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_sbx_experiment.sh)
+- [scripts/install_sbx_env.sh](/home/zzyfan/mujoco_ur5_rl/scripts/install_sbx_env.sh)
+
+这条线的定位是：
+- 复用 `classic` 环境和日志
+- 改成 `JAX` 算法层
+- 先验证：
+  - `goal-conditioned`
+  - `sparse reward`
+  - `joint_position_delta`
+- 暂时不启用 `HER`
+
+作用：
+- 用最小改动验证 SBX 是否值得继续推进成新的统一算法层。
+
+### 4. 服务器脚本与回传预设同步重构
+
+新增脚本：
+- `run_warp_validation_queue.sh`
+- `run_classic_success_queue.sh`
+- `run_sbx_experiment.sh`
+- `start_warp_validation_screen.sh`
+- `start_classic_success_screen.sh`
+- `start_sbx_experiment_screen.sh`
+- `start_total_queue_screen.sh`
+
+新增回传预设：
+- `warp_validation_queue`
+- `classic_success_queue`
+- `sbx_experiment`
+
+作用：
+- 让服务器端训练和本地回传都能按“线的职责”工作，而不是所有实验继续挤在一个脚本里。
+- 让服务器端能直接一键挂起 `screen` 训练，而不是每次手动输入整段 `screen + conda + bash` 命令。
+
 ## 版本 9：把跑飞从主失败逻辑降回诊断信号
 
 目标：

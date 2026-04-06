@@ -88,6 +88,52 @@ ARTIFACT_PRESETS = {
             ("best_model.zip", "vec_normalize.pkl"),
         ),
     },
+    "sbx_experiment": {
+        "sbx_sac_gc_final": (
+            "models/sbx/sac/ur5_cxy/server_sbx_sac_gc/final",
+            ("model.zip", "vec_normalize.pkl"),
+        ),
+        "sbx_sac_gc_best": (
+            "logs/sbx/sac/ur5_cxy/server_sbx_sac_gc/best_model",
+            ("best_model.zip", "vec_normalize.pkl"),
+        ),
+    },
+    "classic_success_queue": {
+        "classic_sac_her_final": (
+            "models/classic/sac/ur5_cxy/server_classic_sac_her/final",
+            ("model.zip", "vec_normalize.pkl"),
+        ),
+        "classic_sac_her_best": (
+            "logs/classic/sac/ur5_cxy/server_classic_sac_her/best_model",
+            ("best_model.zip", "vec_normalize.pkl"),
+        ),
+        "classic_td3_her_final": (
+            "models/classic/td3/ur5_cxy/server_classic_td3_her/final",
+            ("model.zip", "vec_normalize.pkl"),
+        ),
+        "classic_td3_her_best": (
+            "logs/classic/td3/ur5_cxy/server_classic_td3_her/best_model",
+            ("best_model.zip", "vec_normalize.pkl"),
+        ),
+        "classic_ppo_gc_final": (
+            "models/classic/ppo/ur5_cxy/server_classic_ppo_gc/final",
+            ("model.zip", "vec_normalize.pkl"),
+        ),
+        "classic_ppo_gc_best": (
+            "logs/classic/ppo/ur5_cxy/server_classic_ppo_gc/best_model",
+            ("best_model.zip", "vec_normalize.pkl"),
+        ),
+    },
+    "warp_validation_queue": {
+        "warp_ppo_gc_final": (
+            "models/warp_gpu/ppo/ur5_cxy/server_warp_ppo_gc",
+            ("final_policy.msgpack", "config.json"),
+        ),
+        "warp_sac_gc_final": (
+            "models/warp_gpu/sac/ur5_cxy/server_warp_sac_gc",
+            ("final_policy.msgpack", "config.json"),
+        ),
+    },
 }
 
 

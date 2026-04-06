@@ -6,6 +6,7 @@
 
 - `classic/`：主训练线
 - `warp_gpu/`：Warp GPU + MuJoCo Playground / Brax 训练线
+- `sbx_runner/`：SBX 实验线，复用 classic 环境，专门验证 JAX 算法层
 - `assets/`：MuJoCo XML、网格和纹理资源
 - `docs/`：补充说明
 - `server_scripts/`：服务器端直接执行的训练队列脚本
@@ -41,6 +42,16 @@
 - 当前只使用 Brax 官方安装包自带的算法入口
 - 当前适合做“高吞吐 dense/sparse 对照实验”
 
+## `sbx_runner/`
+
+- `train.py`：SBX 实验线训练入口
+
+适用场景：
+
+- 验证 SBX 是否能作为 `classic/` 与 `warp_gpu/` 之间的算法层收敛方案
+- 尝试 `SAC / TD3 / TQC / PPO` 的 JAX 版本
+- 保持 `goal-conditioned + sparse + joint_position_delta`，但先不引入 HER
+
 ## 资源目录
 
 - `assets/robotiq_cxy/`：UR5 CXY 模型资源
@@ -73,18 +84,50 @@ logs/classic/{algo}/{robot}/{run_name}/
 models/warp_gpu/{algo}/{robot}/{run_name}/
 ```
 
+`sbx_runner/` 会写入：
+
+```text
+models/sbx/{algo}/{robot}/{run_name}/
+logs/sbx/{algo}/{robot}/{run_name}/
+```
+
 ## 服务器脚本
 
+- `server_scripts/run_warp_validation_queue.sh`
+  - 只跑 `warp` 高吞吐验证线
+
+- `server_scripts/run_classic_success_queue.sh`
+  - 只跑 `classic` 成功率主线
+
+- `server_scripts/run_sbx_experiment.sh`
+  - 只跑 SBX 实验线
+
+- `server_scripts/start_total_queue_screen.sh`
+  - 一键用 `screen` 托管整轮训练
+
+- `server_scripts/start_warp_validation_screen.sh`
+  - 一键用 `screen` 托管 `warp` 验证线
+
+- `server_scripts/start_classic_success_screen.sh`
+  - 一键用 `screen` 托管 `classic` 成功率主线
+
+- `server_scripts/start_sbx_experiment_screen.sh`
+  - 一键用 `screen` 托管 SBX 实验线
+
 - `server_scripts/run_total_queue.sh`
-  - 用于在服务器里直接通过 `screen` 启动整轮训练
-  - 当前队列顺序是：
-    1. `warp PPO sparse + joint_position_delta + fixed target`
-    2. `warp SAC sparse + joint_position_delta + fixed target`
-    3. `classic SAC + HER + sparse + joint_position_delta`
-    4. `classic TD3 + HER + sparse + joint_position_delta`
+  - 总调度器，当前只顺序启动：
+    1. `warp` 验证线
+    2. `classic` 成功率线
 
 - `scripts/auto_fetch_remote_models.py`
   - 本地模型回传脚本
   - 现在支持按预设下载不同轮次的产物：
     - `legacy_total_queue`
     - `gc_total_queue`
+    - `warp_validation_queue`
+    - `classic_success_queue`
+    - `sbx_experiment`
+
+- `scripts/install_sbx_env.sh`
+  - 在当前激活环境里安装并验证 `sbx-rl`
+  - 会同步对齐 `jax` 与 CUDA plugin / PJRT 版本

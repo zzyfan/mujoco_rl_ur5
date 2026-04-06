@@ -15,7 +15,7 @@ from brax.io import model as brax_model
 from brax.training.agents.ppo import train as ppo
 from brax.training.agents.sac import train as sac
 from mujoco_playground._src import wrapper
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 if __package__ in (None, ""):
     ROOT = Path(__file__).resolve().parents[1]

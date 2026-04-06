@@ -1,9 +1,10 @@
 # MuJoCo UR5 RL
 
-纯 MuJoCo 机械臂强化学习项目，当前包含两条训练线：
+纯 MuJoCo 机械臂强化学习项目，当前包含三条训练线：
 
-- `classic/`：主训练线，基于 Gymnasium + Stable-Baselines3
-- `warp_gpu/`：Warp GPU + MuJoCo Playground + Brax 训练入口
+- `classic/`：成功率主线，基于 Gymnasium + Stable-Baselines3
+- `warp_gpu/`：Warp GPU 高吞吐验证线
+- `sbx_runner/`：JAX 算法层实验线（SBX）
 
 当前仓库支持两套机械臂模型：
 
@@ -22,6 +23,40 @@
 ```bash
 cd /home/zzyfan/mujoco_ur5_rl
 pip install -r requirements.txt
+```
+
+如果要启用 `SBX` 实验线，建议直接执行：
+
+```bash
+bash scripts/install_sbx_env.sh
+```
+
+本地环境建议：
+
+- `classic/`、`warp_gpu/` 和模型测试可以继续使用你现有的训练环境
+- `SBX` 实验线建议直接在目标环境里执行 [install_sbx_env.sh](/home/zzyfan/mujoco_ur5_rl/scripts/install_sbx_env.sh)
+- 这个安装脚本会补齐 `sbx-rl`，并把 `jax` 与 CUDA plugin / PJRT 版本对齐
+
+安装完成后，可用下面这条确认 JAX 已经识别 GPU：
+
+```bash
+python - <<'PY'
+import jax
+print(jax.devices())
+PY
+```
+
+服务器环境建议：
+
+- 项目目录：`/root/autodl-tmp/mujoco_rl_ur5`
+- conda 环境：`mujoco`
+- 每次服务器同步到新版后，建议执行：
+
+```bash
+cd /root/autodl-tmp/mujoco_rl_ur5
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mujoco
+bash scripts/install_sbx_env.sh
 ```
 
 随机策略冒烟测试：
@@ -75,7 +110,7 @@ python classic/test.py \
 
 ### `classic/`
 
-这条线是当前推荐主线。
+这条线是当前推荐的成功率主线。
 
 - 环境：`classic/env.py`
 - 训练入口：`classic/train.py`
@@ -92,6 +127,7 @@ python classic/test.py \
 - 支持 `torque / joint_position_delta` 两种控制接口
 - 支持 `VecNormalize`
 - 支持 `best_model / final / interrupted`
+- 支持 `HER`（当前限定在 `SAC / TD3`）
 - 支持 `zero_robotiq` 机器人参数
 - 支持 `--legacy-zero-ee-velocity` 旧版速度读取开关
 - `ur5_cxy` 模型已将视觉 `mesh` 和代理碰撞体分离，减少复杂网格碰撞带来的训练噪声
@@ -100,7 +136,7 @@ python classic/test.py \
 
 ### `warp_gpu/`
 
-这条线提供纯 GPU 的 Warp 训练入口。
+这条线提供纯 GPU 的 Warp 训练入口，也是当前的高吞吐验证线。
 
 - 环境：`warp_gpu/env.py`
 - 训练入口：`warp_gpu/train.py`
@@ -124,7 +160,13 @@ python classic/test.py \
 - `warp_gpu/env.py` 与 `classic/env.py` 现在使用同一套危险碰撞过滤逻辑：忽略目标球、灯光和机器人内部自接触
 - `warp_gpu/` 当前支持“分阶段启动”的课程学习：先用固定目标训练，再切到小范围随机和全范围随机
 - `warp_gpu/` 现在也支持 `dense / sparse` 奖励切换；其中 `sparse` 更适合做 success/fail 主导的对照实验
-- 项目提供 [server_scripts/run_total_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_total_queue.sh) 作为服务器端 `screen` 队列脚本，可直接在远端启动整轮训练；当前顺序是 `warp PPO -> warp SAC -> classic SAC+HER -> classic TD3+HER -> classic PPO`
+- 服务器脚本现在按职责拆成三条：
+  - [run_warp_validation_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_warp_validation_queue.sh)
+  - [run_classic_success_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_classic_success_queue.sh)
+  - [run_sbx_experiment.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_sbx_experiment.sh)
+- [run_total_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_total_queue.sh) 现在只是总调度器，顺序是：
+  1. `warp` 验证线
+  2. `classic` 成功率线
 
 示例：
 
@@ -137,14 +179,61 @@ python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --epi
 python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --episodes 1 --render --render-mode human
 ```
 
+### `sbx_runner/`
+
+这条线是当前新增的 JAX 算法层实验线。
+
+- 环境：复用 `classic/env.py`
+- 训练入口：`sbx_runner/train.py`
+- 算法：`SAC / TD3 / TQC / PPO`
+- 依赖：`sbx-rl`
+
+定位：
+
+- 不替代 `classic/` 的 `HER` 主线
+- 不替代 `warp_gpu/` 的 GPU-native 高吞吐主线
+- 用来验证 “JAX 算法层 + 现有 MuJoCo/Gym 环境” 能否把方法论进一步收敛
+
+当前默认策略：
+
+- `goal-conditioned`
+- `sparse reward`
+- `joint_position_delta`
+- 暂不启用 `HER`
+
+示例：
+
+```bash
+python -m sbx_runner.train \
+  --algo sac \
+  --robot ur5_cxy \
+  --run-name exp_sbx_sac \
+  --n-envs 128 \
+  --device cuda
+```
+
 服务器端直接跑整轮训练：
 
 ```bash
 cd /root/autodl-tmp/mujoco_rl_ur5
-screen -U -S total_queue
-source /root/miniconda3/etc/profile.d/conda.sh
-conda activate mujoco
-bash server_scripts/run_total_queue.sh
+bash server_scripts/start_total_queue_screen.sh
+```
+
+单独启动某一条线：
+
+```bash
+bash server_scripts/start_warp_validation_screen.sh
+bash server_scripts/start_classic_success_screen.sh
+bash server_scripts/start_sbx_experiment_screen.sh
+```
+
+attach 到训练会话：
+
+```bash
+screen -U -r total_queue
+screen -U -r warp_validation_queue
+screen -U -r classic_success_queue
+screen -U -r sbx_experiment
 ```
 
 本地回拉当前新版整轮产物：
@@ -164,6 +253,13 @@ python scripts/auto_fetch_remote_models.py \
 
 - `downloads/remote_models/models/...`
 - `downloads/remote_models/logs/.../best_model`
+
+当前还支持按职责选择回传预设：
+
+- `gc_total_queue`
+- `warp_validation_queue`
+- `classic_success_queue`
+- `sbx_experiment`
 
 如果你想兼容旧版“按预设名平铺目录”的方式，再额外加：
 
@@ -191,6 +287,7 @@ python scripts/auto_fetch_remote_models.py \
 - `classic/` 训练时若把 `n_envs / batch_size / gradient_steps` 设得过大，会自动收回到更适合 CPU MuJoCo 吞吐的区间；当前吞吐优先档默认会把 `frame_skip` 拉到 `2`
 - `warp_gpu/`：除了进度条，还会打印 Brax 回调返回的关键指标，例如 `eval_episode_reward / episode_sum_reward / distance / success / collision / runaway / timeout`
 - `warp_gpu/`：现在也会把 success/collision/runaway/timeout 同时打印成“比例 + 次数”，例如 `eval_success=12.50% eval_success_count=8/64`
+- `sbx_runner/`：沿用 `classic` 的最近窗口统计，会输出 `success_rate / success_count / collision_count / timeout_count / done_reasons`
 - `warp_gpu/` 现在建议优先组合：
   - `--controller-mode joint_position_delta`
   - `--reward-mode sparse`
