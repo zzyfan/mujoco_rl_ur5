@@ -171,6 +171,18 @@ python scripts/auto_fetch_remote_models.py \
 --layout artifact
 ```
 
+如果你希望“整轮训练全部完成后再统一回传”，保持默认即可：
+
+```bash
+--download-mode all_at_end
+```
+
+如果你想谁先训完谁先下载，再改成：
+
+```bash
+--download-mode incremental
+```
+
 ## 训练日志
 
 `classic/` 和 `warp_gpu/` 现在都会在训练过程中打印阶段日志。

@@ -4,6 +4,7 @@
 支持多套训练产物预设，便于：
 - 兼容旧版训练目录命名
 - 下载当前新版 `goal-conditioned / sparse / joint_position_delta` 训练轮次
+- 按“全部产物就绪后统一回传”或“谁先完成先回传”两种模式工作
 """
 
 from __future__ import annotations
@@ -152,6 +153,12 @@ def _parse_args() -> argparse.Namespace:
         default="legacy_total_queue",
         help="选择本轮训练对应的产物目录预设。",
     )
+    parser.add_argument(
+        "--download-mode",
+        choices=("all_at_end", "incremental"),
+        default="all_at_end",
+        help="all_at_end: 全部产物就绪后统一回传；incremental: 谁先就绪先下载谁。",
+    )
     return parser.parse_args()
 
 
@@ -176,18 +183,33 @@ def main() -> int:
     downloaded: set[str] = set()
     try:
         while len(downloaded) < len(artifacts):
+            ready_now: list[tuple[str, str]] = []
             for artifact_name, (rel_dir, required_files) in artifacts.items():
                 if artifact_name in downloaded:
                     continue
                 if _artifact_ready(sftp, args.remote_root, rel_dir, required_files):
+                    ready_now.append((artifact_name, rel_dir))
+
+            if args.download_mode == "incremental":
+                for artifact_name, rel_dir in ready_now:
+                    if artifact_name in downloaded:
+                        continue
                     print(f"[ready] {artifact_name}: {rel_dir}", flush=True)
                     _download_artifact(sftp, args.remote_root, local_root, artifact_name, rel_dir, args.layout)
                     downloaded.add(artifact_name)
                     target_dir = (local_root / artifact_name) if args.layout == "artifact" else (local_root / Path(rel_dir))
                     print(f"[downloaded] {artifact_name} -> {target_dir}", flush=True)
+            else:
+                if len(ready_now) == len(artifacts):
+                    print(f"[ready] all configured artifacts are available ({len(artifacts)}/{len(artifacts)})", flush=True)
+                    for artifact_name, rel_dir in ready_now:
+                        _download_artifact(sftp, args.remote_root, local_root, artifact_name, rel_dir, args.layout)
+                        downloaded.add(artifact_name)
+                        target_dir = (local_root / artifact_name) if args.layout == "artifact" else (local_root / Path(rel_dir))
+                        print(f"[downloaded] {artifact_name} -> {target_dir}", flush=True)
             if len(downloaded) < len(artifacts):
                 print(
-                    f"[poll] preset={args.preset} downloaded={len(downloaded)}/{len(artifacts)} waiting={args.poll_seconds}s",
+                    f"[poll] preset={args.preset} mode={args.download_mode} ready={len(ready_now)}/{len(artifacts)} downloaded={len(downloaded)}/{len(artifacts)} waiting={args.poll_seconds}s",
                     flush=True,
                 )
                 time.sleep(args.poll_seconds)

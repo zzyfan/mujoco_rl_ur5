@@ -375,3 +375,4 @@
 - 让模型默认落到：
   - `downloads/remote_models/models/...`
   - `downloads/remote_models/logs/.../best_model`
+- 默认改成“整轮全部产物齐了后统一回传”，避免训练中途先拿到半套模型。

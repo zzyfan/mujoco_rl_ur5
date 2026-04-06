@@ -98,5 +98,6 @@
   - 默认按远端目录镜像到本地
   - 模型会落到 `downloads/remote_models/models/...`
   - `best_model` 会落到 `downloads/remote_models/logs/.../best_model`
+  - 默认按“全部产物齐了再统一回传”模式工作
 - 如需兼容旧版平铺下载结构，可继续使用：
   - `--layout artifact`
