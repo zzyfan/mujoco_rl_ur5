@@ -289,6 +289,15 @@
   - `collision_count`
   - `runaway_count`
   - `timeout_count`
+- `warp_gpu` 训练日志新增：
+  - `eval_success_count`
+  - `eval_collision_count`
+  - `eval_runaway_count`
+  - `eval_timeout_count`
+  - `train_success_count`
+  - `train_collision_count`
+  - `train_runaway_count`
+  - `train_timeout_count`
 - 测试脚本支持：
   - 固定目标点
   - 慢速渲染

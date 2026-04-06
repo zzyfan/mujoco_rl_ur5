@@ -72,6 +72,7 @@
   - `collision_count`
   - `runaway_count`
   - `timeout_count`
+- `warp_gpu` 训练日志也补上了 success/collision/runaway/timeout 的次数字段，方便和 `classic` 统一对比
 
 ## 当前推荐优先级
 

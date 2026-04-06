@@ -190,6 +190,7 @@ python scripts/auto_fetch_remote_models.py \
 - `classic/`：按时间步输出最近窗口内的 `recent_reward / recent_ep_len / recent_distance / success_rate / success_count / collision_rate / collision_count / runaway_rate / runaway_count / timeout_rate / timeout_count`，若开启评估还会附带 `eval_reward`
 - `classic/` 训练时若把 `n_envs / batch_size / gradient_steps` 设得过大，会自动收回到更适合 CPU MuJoCo 吞吐的区间；当前吞吐优先档默认会把 `frame_skip` 拉到 `2`
 - `warp_gpu/`：除了进度条，还会打印 Brax 回调返回的关键指标，例如 `eval_episode_reward / episode_sum_reward / distance / success / collision / runaway / timeout`
+- `warp_gpu/`：现在也会把 success/collision/runaway/timeout 同时打印成“比例 + 次数”，例如 `eval_success=12.50% eval_success_count=8/64`
 - `warp_gpu/` 现在建议优先组合：
   - `--controller-mode joint_position_delta`
   - `--reward-mode sparse`

@@ -65,6 +65,14 @@ def _collect_logged_metrics(metrics: dict) -> dict[str, float]:
     return logged
 
 
+def _rate_count_summary(rate: float, total: int) -> str:
+    """把 0~1 比例折成 `命中次数/窗口大小` 形式，方便和 classic 日志对齐。"""
+    total = max(int(total), 1)
+    hits = int(round(float(rate) * total))
+    hits = max(0, min(hits, total))
+    return f"{hits}/{total}"
+
+
 @dataclass
 class TrainArgs:
     algo: str = "ppo"  # Brax 训练器名称，可选 `ppo`、`sac`。
@@ -327,20 +335,28 @@ def _run_train(args: TrainArgs) -> int:
             postfix["train_distance"] = f"{logged_metrics['episode/distance']:.4f}"
         if "eval/success" in logged_metrics:
             postfix["eval_success"] = f"{logged_metrics['eval/success']:.2%}"
+            postfix["eval_success_count"] = _rate_count_summary(logged_metrics["eval/success"], args.num_eval_envs)
         elif "episode/success" in logged_metrics:
             postfix["train_success"] = f"{logged_metrics['episode/success']:.2%}"
+            postfix["train_success_count"] = _rate_count_summary(logged_metrics["episode/success"], args.num_envs)
         if "eval/collision" in logged_metrics:
             postfix["eval_collision"] = f"{logged_metrics['eval/collision']:.2%}"
+            postfix["eval_collision_count"] = _rate_count_summary(logged_metrics["eval/collision"], args.num_eval_envs)
         elif "episode/collision" in logged_metrics:
             postfix["train_collision"] = f"{logged_metrics['episode/collision']:.2%}"
+            postfix["train_collision_count"] = _rate_count_summary(logged_metrics["episode/collision"], args.num_envs)
         if "eval/runaway" in logged_metrics:
             postfix["eval_runaway"] = f"{logged_metrics['eval/runaway']:.2%}"
+            postfix["eval_runaway_count"] = _rate_count_summary(logged_metrics["eval/runaway"], args.num_eval_envs)
         elif "episode/runaway" in logged_metrics:
             postfix["train_runaway"] = f"{logged_metrics['episode/runaway']:.2%}"
+            postfix["train_runaway_count"] = _rate_count_summary(logged_metrics["episode/runaway"], args.num_envs)
         if "eval/timeout" in logged_metrics:
             postfix["eval_timeout"] = f"{logged_metrics['eval/timeout']:.2%}"
+            postfix["eval_timeout_count"] = _rate_count_summary(logged_metrics["eval/timeout"], args.num_eval_envs)
         elif "episode/timeout" in logged_metrics:
             postfix["train_timeout"] = f"{logged_metrics['episode/timeout']:.2%}"
+            postfix["train_timeout_count"] = _rate_count_summary(logged_metrics["episode/timeout"], args.num_envs)
         if postfix:
             progress_bar.set_postfix(postfix)
         if logged_metrics:
@@ -349,6 +365,14 @@ def _run_train(args: TrainArgs) -> int:
                 label = key.replace("/", "_")
                 if "success" in key or "collision" in key or "runaway" in key or "timeout" in key:
                     summary_parts.append(f"{label}={value:.2%}")
+                    if key.startswith("eval/"):
+                        summary_parts.append(
+                            f"{label}_count={_rate_count_summary(value, args.num_eval_envs)}"
+                        )
+                    elif key.startswith("episode/"):
+                        summary_parts.append(
+                            f"{label}_count={_rate_count_summary(value, args.num_envs)}"
+                        )
                 elif "distance" in key:
                     summary_parts.append(f"{label}={value:.4f}")
                 else:
