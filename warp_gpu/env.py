@@ -54,6 +54,7 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         joint_position_delta_scale=0.08,  # `joint_position_delta` 模式下每步允许的关节目标增量。
         position_control_kp=45.0,  # 位置控制模式比例增益。
         position_control_kd=3.0,  # 位置控制模式阻尼增益。
+        goal_observation=False,  # 是否额外拼接 achieved/desired goal，作为轻量 goal-conditioned 近似。
         reward_mode="dense",  # 奖励模式：`dense` 或 `sparse`；sparse 更接近 robotics + HER 论文常用设定。
         fixed_gripper_ctrl=0.0,
         enable_gravity_motors=True,
@@ -376,7 +377,12 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         relative_pos = target_pos - ee_pos
         joint_pos = data.qpos[self._arm_qpos_adr]
         joint_vel = data.qvel[self._arm_qvel_adr]
-        return jp.concatenate([relative_pos, joint_pos, joint_vel, prev_torque, ee_vel]).astype(jp.float32)  # 观测向量由相对位置、关节状态和速度组成。
+        base_obs = jp.concatenate([relative_pos, joint_pos, joint_vel, prev_torque, ee_vel]).astype(jp.float32)
+        if bool(self._config.goal_observation):
+            # 参考 FetchReach / panda-gym，把 achieved / desired goal 显式暴露给策略。
+            # 这里仍保持 flat observation，避免为了字典观测破坏 Warp 线当前的高吞吐训练栈。
+            return jp.concatenate([base_obs, ee_pos.astype(jp.float32), target_pos.astype(jp.float32)]).astype(jp.float32)
+        return base_obs  # 默认兼容旧版观测布局。
 
     def _compute_goal_reward(
         self,

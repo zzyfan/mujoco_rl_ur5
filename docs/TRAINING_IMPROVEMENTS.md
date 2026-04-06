@@ -412,6 +412,7 @@
 
 - `--reward-mode dense`
 - `--reward-mode sparse`
+- `--goal-observation`
 
 这样训练、评估和推理就不会因为奖励模式不一致而产生歧义。
 
@@ -419,11 +420,19 @@
 - `warp_gpu/` 现在也可以做：
   - dense shaping 训练
   - sparse success/fail 训练
+  - goal-aware observation 训练
 - 这让它更接近：
   - `panda-gym`
   - `Gymnasium-Robotics`
   - `rl-baselines3-zoo`
  里常见的 robotics 任务设计方式。
+
+补充：
+- `goal_observation` 会把：
+  - `achieved_goal`
+  - `desired_goal`
+  显式拼进 flat observation。
+- 这样做不等于完整 `HER`，但已经把 `warp` 线朝 `FetchReach / panda-gym` 的 goal-conditioned 方向推进了一步。
 
 说明：
 - `warp_gpu/` 目前仍然没有 `goal-conditioned + HER`。
@@ -437,6 +446,10 @@
   - `joint_position_delta`
   - `sparse reward`
  这套设置下的 on-policy 对照实验。
+
+- `run_warp_validation_queue.sh` 现在还把 `episode_length` 从 `3000` 收到 `1000`：
+  - 先减少长回合纯 timeout 对训练信号的拖累
+  - 更贴近 “先拿到第一次成功” 的 success-first 训练思路
 
 ## 版本 12：HER 启动保护与镜像式模型回传
 

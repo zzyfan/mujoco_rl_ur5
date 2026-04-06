@@ -112,6 +112,7 @@ class TrainArgs:
     joint_position_delta_scale: float = 0.08  # 位置增量控制时每步允许的关节目标增量。
     position_control_kp: float = 45.0  # 位置控制比例增益。
     position_control_kd: float = 3.0  # 位置控制阻尼增益。
+    goal_observation: bool = False  # 是否显式把 achieved/desired goal 拼进 flat observation。
     reward_mode: str = "dense"  # 奖励模式：`dense` 或 `sparse`。
     logdir: str = "logs/warp_gpu"  # 文本日志输出目录。
     model_dir: str = "models/warp_gpu"  # 配置、checkpoint 和最终参数目录。
@@ -161,6 +162,7 @@ def _parse_args() -> TrainArgs:
     p.add_argument("--joint-position-delta-scale", type=float, default=0.08)  # 位置增量控制每步允许的目标增量。
     p.add_argument("--position-control-kp", type=float, default=45.0)  # 位置控制比例增益。
     p.add_argument("--position-control-kd", type=float, default=3.0)  # 位置控制阻尼增益。
+    p.add_argument("--goal-observation", action=argparse.BooleanOptionalAction, default=False)  # 额外拼接 achieved/desired goal。
     p.add_argument("--reward-mode", choices=["dense", "sparse"], default="dense")  # Warp 线也支持稀疏成功奖励。
     p.add_argument("--logdir", type=str, default="logs/warp_gpu")  # 日志目录。
     p.add_argument("--model-dir", type=str, default="models/warp_gpu")  # 配置和模型输出目录。
@@ -208,6 +210,7 @@ def _parse_args() -> TrainArgs:
         joint_position_delta_scale=ns.joint_position_delta_scale,
         position_control_kp=ns.position_control_kp,
         position_control_kd=ns.position_control_kd,
+        goal_observation=ns.goal_observation,
         reward_mode=ns.reward_mode,
         logdir=ns.logdir,
         model_dir=ns.model_dir,
@@ -238,6 +241,7 @@ def _build_env_config(args: TrainArgs):
     cfg.joint_position_delta_scale = float(args.joint_position_delta_scale)  # 位置增量控制每步的目标增量。
     cfg.position_control_kp = float(args.position_control_kp)  # 位置控制比例增益。
     cfg.position_control_kd = float(args.position_control_kd)  # 位置控制阻尼增益。
+    cfg.goal_observation = bool(args.goal_observation)  # 显式 achieved/desired goal，有助于 success-first 训练。
     cfg.reward_mode = str(args.reward_mode)  # `sparse` 时回到 success/fail 主导的 robotics 训练口径。
     cfg.fixed_target_x = args.fixed_target_x  # 固定目标点 x。
     cfg.fixed_target_y = args.fixed_target_y  # 固定目标点 y。
@@ -287,7 +291,8 @@ def _run_train(args: TrainArgs) -> int:
     print(
         f"num_envs={args.num_envs} num_eval_envs={args.num_eval_envs} "
         f"episode_length={args.episode_length} target_sampling_mode={args.target_sampling_mode} "
-        f"reward_mode={args.reward_mode} controller_mode={args.controller_mode}"
+        f"reward_mode={args.reward_mode} controller_mode={args.controller_mode} "
+        f"goal_observation={args.goal_observation}"
     )
     print(f"run_dir={run_dir}")
     print(f"warp={describe_warp_runtime()}")

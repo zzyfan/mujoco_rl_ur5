@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Warp 验证线：
 # - 定位：GPU 高吞吐验证线
-# - 目标：用 sparse reward + joint_position_delta + curriculum 快速验证 first success 是否出现
-# - 说明：这里先不接 HER，而是保持 Warp 的 GPU 高并行优势
+# - 目标：用 sparse reward + joint_position_delta + goal-aware observation 快速验证 first success 是否出现
+# - 说明：这里先不接 HER，而是保持 Warp 的 GPU 高并行优势；验证线优先缩短回合，减少长超时坏解
 
 set -euo pipefail
 
@@ -19,7 +19,7 @@ python -m warp_gpu.train \
   --robot ur5_cxy \
   --run-name server_warp_ppo_gc \
   --num-timesteps 5000000 \
-  --episode-length 3000 \
+  --episode-length 1000 \
   --num-envs 512 \
   --num-eval-envs 64 \
   --batch-size 4096 \
@@ -27,6 +27,7 @@ python -m warp_gpu.train \
   --joint-position-delta-scale 0.08 \
   --position-control-kp 45 \
   --position-control-kd 3 \
+  --goal-observation \
   --reward-mode sparse \
   --target-sampling-mode fixed \
   --fixed-target-x -0.775 \
@@ -45,7 +46,7 @@ python -m warp_gpu.train \
   --robot ur5_cxy \
   --run-name server_warp_sac_gc \
   --num-timesteps 5000000 \
-  --episode-length 3000 \
+  --episode-length 1000 \
   --num-envs 512 \
   --num-eval-envs 64 \
   --batch-size 4096 \
@@ -55,6 +56,7 @@ python -m warp_gpu.train \
   --joint-position-delta-scale 0.08 \
   --position-control-kp 45 \
   --position-control-kd 3 \
+  --goal-observation \
   --reward-mode sparse \
   --target-sampling-mode fixed \
   --fixed-target-x -0.775 \
@@ -68,4 +70,3 @@ python -m warp_gpu.train \
   --njmax 1024
 
 echo "[warp-queue] all done $(date '+%F %T')"
-
