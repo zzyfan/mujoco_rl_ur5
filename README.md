@@ -123,6 +123,7 @@ python classic/test.py \
 - 运行前提：需要 `warp-lang`、`mujoco-warp` 和可用 CUDA 设备
 - `warp_gpu/env.py` 与 `classic/env.py` 现在使用同一套危险碰撞过滤逻辑：忽略目标球、灯光和机器人内部自接触
 - `warp_gpu/` 当前支持“分阶段启动”的课程学习：先用固定目标训练，再切到小范围随机和全范围随机
+- `warp_gpu/` 现在也支持 `dense / sparse` 奖励切换；其中 `sparse` 更适合做 success/fail 主导的对照实验
 
 示例：
 
@@ -130,6 +131,7 @@ python classic/test.py \
 python -m warp_gpu.smoke --robot ur5_cxy --steps 2
 python -m warp_gpu.train --algo ppo --robot ur5_cxy --num-envs 256
 python -m warp_gpu.train --algo sac --robot ur5_cxy --num-envs 16 --num-eval-envs 16
+python -m warp_gpu.train --algo sac --robot ur5_cxy --reward-mode sparse --controller-mode joint_position_delta --target-sampling-mode fixed --num-envs 256
 python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --episodes 3
 python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --episodes 1 --render --render-mode human
 ```
@@ -141,6 +143,11 @@ python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --epi
 - `classic/`：按时间步输出最近窗口内的 `recent_reward / recent_ep_len / recent_distance / success_rate / collision_rate / runaway_rate / timeout_rate`，若开启评估还会附带 `eval_reward`
 - `classic/` 训练时若把 `n_envs / batch_size / gradient_steps` 设得过大，会自动收回到更适合 CPU MuJoCo 吞吐的区间；当前吞吐优先档默认会把 `frame_skip` 拉到 `2`
 - `warp_gpu/`：除了进度条，还会打印 Brax 回调返回的关键指标，例如 `eval_episode_reward / episode_sum_reward / distance / success / collision / runaway / timeout`
+- `warp_gpu/` 现在建议优先组合：
+  - `--controller-mode joint_position_delta`
+  - `--reward-mode sparse`
+  - `--target-sampling-mode fixed`
+  先拿到第一次成功，再切到小范围随机和全范围随机
 - 训练结束时两条线都会额外打印最后一次可用回报
 - `collision_rate` 现在对应“过滤后的危险碰撞率”；若需要对照原始 MuJoCo 接触数，可查看 `info['raw_collision_contacts']`
 - `runaway_rate` 现在表示“回合内曾出现明显发散迹象的比例”，用于诊断而不是直接判失败

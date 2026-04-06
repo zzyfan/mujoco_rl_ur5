@@ -293,3 +293,50 @@
 作用：
 - 更快判断“为什么没成功”
 - 更容易验证 curriculum / HER / 控制接口是否真正改善了首次成功率
+
+## 版本 11：warp 奖励模式补齐
+
+目标：
+- 让 `warp_gpu/` 不再只有 dense reward 一种口径。
+- 把 `warp_gpu/` 也收进 robotics 任务常见的 `success/fail` 训练接口。
+- 给 `warp` 补上一条可直接和 `classic sparse + HER` 对照的实验线。
+
+实现：
+
+### 1. warp 新增 `reward_mode`
+
+在 [warp_gpu/env.py](/home/zzyfan/mujoco_ur5_rl/warp_gpu/env.py) 中新增：
+
+- `reward_mode=dense`
+- `reward_mode=sparse`
+
+其中：
+- `dense` 继续保留当前距离 shaping 奖励
+- `sparse` 改成：
+  - 成功：`0`
+  - 失败：`-1`
+
+### 2. train/test 同步参数
+
+在 [warp_gpu/train.py](/home/zzyfan/mujoco_ur5_rl/warp_gpu/train.py) 和 [warp_gpu/test.py](/home/zzyfan/mujoco_ur5_rl/warp_gpu/test.py) 中同步加入：
+
+- `--reward-mode dense`
+- `--reward-mode sparse`
+
+这样训练、评估和推理就不会因为奖励模式不一致而产生歧义。
+
+作用：
+- `warp_gpu/` 现在也可以做：
+  - dense shaping 训练
+  - sparse success/fail 训练
+- 这让它更接近：
+  - `panda-gym`
+  - `Gymnasium-Robotics`
+  - `rl-baselines3-zoo`
+ 里常见的 robotics 任务设计方式。
+
+说明：
+- `warp_gpu/` 目前仍然没有 `goal-conditioned + HER`。
+- 所以当前推荐分工是：
+  - `classic`：goal-conditioned + HER 主线
+  - `warp_gpu`：高吞吐 dense/sparse 对照线

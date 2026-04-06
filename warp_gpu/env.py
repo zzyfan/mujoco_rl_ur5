@@ -54,6 +54,7 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         joint_position_delta_scale=0.08,  # `joint_position_delta` 模式下每步允许的关节目标增量。
         position_control_kp=45.0,  # 位置控制模式比例增益。
         position_control_kd=3.0,  # 位置控制模式阻尼增益。
+        reward_mode="dense",  # 奖励模式：`dense` 或 `sparse`；sparse 更接近 robotics + HER 论文常用设定。
         fixed_gripper_ctrl=0.0,
         enable_gravity_motors=True,
         gravity_ctrl=-1.0,
@@ -377,6 +378,23 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         joint_vel = data.qvel[self._arm_qvel_adr]
         return jp.concatenate([relative_pos, joint_pos, joint_vel, prev_torque, ee_vel]).astype(jp.float32)  # 观测向量由相对位置、关节状态和速度组成。
 
+    def _compute_goal_reward(
+        self,
+        achieved_goal: jax.Array,
+        desired_goal: jax.Array,
+        success_threshold: jax.Array,
+    ) -> jax.Array:
+        """按 goal-conditioned robotics 习惯返回 dense / sparse 奖励。
+
+        这里和 classic 线保持同一口径：
+        - dense: 直接返回负距离，便于做连续 shaping
+        - sparse: 成功为 0，失败为 -1
+        """
+        distance = jp.linalg.norm(achieved_goal - desired_goal)
+        if str(self._config.reward_mode).lower() == "sparse":
+            return jp.where(distance <= success_threshold, 0.0, -1.0).astype(jp.float32)
+        return (-distance).astype(jp.float32)
+
     def _contact_count(self, data: mjx.Data) -> tuple[jax.Array, jax.Array]:
         """返回 (危险接触数, 原始有效接触数)。"""
         contact = getattr(data, "contact", None)
@@ -553,6 +571,11 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
         nan_done = jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
         timeout = task_step >= jp.asarray(self._config.episode_length, dtype=jp.int32)
         done = jp.logical_or(jp.logical_or(success, collision), jp.logical_or(nan_done, timeout)).astype(jp.float32)  # reach 任务主终止只保留 success/collision/timeout。
+
+        if str(self._config.reward_mode).lower() == "sparse":
+            # Warp 线补齐 sparse reward 后，训练主线就能和参考的 robotics 项目更一致：
+            # success/fail 明确，长回合 dense 累积不再主导价值估计。
+            reward = self._compute_goal_reward(ee_pos, self._get_target_pos(data), current_success_threshold)
 
         metrics = {
             **state.metrics,  # 保留包装器维护的统计项，避免评估阶段的 metrics 结构变化。

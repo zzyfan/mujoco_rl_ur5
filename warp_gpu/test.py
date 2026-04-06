@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--joint-position-delta-scale", type=float, default=0.08)  # 位置增量控制每步允许的目标增量。
     p.add_argument("--position-control-kp", type=float, default=45.0)  # 位置控制比例增益。
     p.add_argument("--position-control-kd", type=float, default=3.0)  # 位置控制阻尼增益。
+    p.add_argument("--reward-mode", choices=["dense", "sparse"], default="dense")  # 测试时也要和训练奖励模式保持一致。
     p.add_argument("--render", action="store_true")  # 打开可视化窗口，便于肉眼观察策略动作。
     p.add_argument("--no-render", action="store_false", dest="render")  # 显式关闭渲染。
     p.set_defaults(render=False)
@@ -267,6 +268,7 @@ def main() -> None:
     cfg.joint_position_delta_scale = float(args.joint_position_delta_scale)
     cfg.position_control_kp = float(args.position_control_kp)
     cfg.position_control_kd = float(args.position_control_kd)
+    cfg.reward_mode = str(args.reward_mode)
 
     env = UR5ReachWarpEnv(config=cfg)
     if args.artifact == "final":

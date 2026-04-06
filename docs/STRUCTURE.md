@@ -27,9 +27,9 @@
 
 - `runtime.py`：Warp CUDA 运行时检测与设备初始化
 - `smoke.py`：轻量自检与 smoke test
-- `env.py`：Warp GPU reach 环境、课程采样和失败类型诊断
+- `env.py`：Warp GPU reach 环境、课程采样、`dense/sparse` 奖励切换和失败类型诊断
 - `train.py`：Playground / Brax 训练入口、进度条和阶段训练日志
-- `test.py`：Warp GPU 策略推理测试（final_policy 或 checkpoint）
+- `test.py`：Warp GPU 策略推理测试（final_policy 或 checkpoint），支持与训练一致的控制模式和奖励模式
 
 适用场景：
 
@@ -37,6 +37,7 @@
 - PPO / SAC 并行训练
 - 跟 Brax 训练器对接
 - 当前只使用 Brax 官方安装包自带的算法入口
+- 当前适合做“高吞吐 dense/sparse 对照实验”
 
 ## 资源目录
 
