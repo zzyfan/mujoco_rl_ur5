@@ -92,10 +92,10 @@ def default_config(robot: str = "ur5_cxy") -> config_dict.ConfigDict:
         success_speed_bonus_slow=1000.0,
         success_speed_bonus_medium=500.0,
         collision_penalty_value=8000.0,
-        runaway_distance_threshold=2.0,
+        runaway_distance_threshold=2.0,  # 跑飞阈值仅作为诊断信号，不再直接终止回合。
         runaway_ee_speed_threshold=4.0,
         runaway_joint_velocity_threshold=12.0,
-        runaway_penalty_value=3000.0,
+        runaway_penalty_value=3000.0,  # 兼容旧配置字段，当前不再直接写入奖励。
     )
     if robot == "zero_robotiq":
         cfg.model_xml = "assets/zero_arm/zero_with_robotiq_reach.xml"
@@ -396,6 +396,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             "prev_ee_pos": ee_pos,
             "task_step": jp.asarray(0, dtype=jp.int32),
             "success_threshold": self._current_success_threshold(),
+            "runaway_seen": jp.asarray(0.0, dtype=jp.float32),
         }
         return mjx_env.State(
             data=data,
@@ -460,7 +461,8 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             0.0,
         )
 
-        # 跑飞保护会尽早截断发散轨迹，避免整回合把距离惩罚累计到百万级。
+        # 跑飞在 Warp 线里也只保留成诊断信号：
+        # 训练主逻辑回到 success/collision/timeout，避免“防跑飞”盖过 reach 任务本身。
         runaway = jp.logical_or(
             distance > self._config.runaway_distance_threshold,
             jp.logical_or(
@@ -468,7 +470,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
                 jp.max(jp.abs(joint_vel)) > self._config.runaway_joint_velocity_threshold,
             ),
         )
-        reward -= jp.where(runaway, self._config.runaway_penalty_value, 0.0)
+        runaway_seen = jp.logical_or(state.info["runaway_seen"] > 0.5, runaway)
 
         collision_contacts, raw_collision_contacts = self._contact_count(data)  # 只统计机器人与外部危险几何的接触。
         collision = collision_contacts > 0
@@ -495,15 +497,10 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             -self._config.step_penalty * remaining_steps.astype(jp.float32),
             0.0,
         )
-        reward += jp.where(
-            jp.logical_and(runaway, jp.logical_not(success)),
-            -self._config.step_penalty * remaining_steps.astype(jp.float32),
-            0.0,
-        )
 
         nan_done = jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
         timeout = task_step >= jp.asarray(self._config.episode_length, dtype=jp.int32)
-        done = jp.logical_or(jp.logical_or(success, collision), jp.logical_or(runaway, jp.logical_or(nan_done, timeout))).astype(jp.float32)  # 任一终止条件满足后结束回合。
+        done = jp.logical_or(jp.logical_or(success, collision), jp.logical_or(nan_done, timeout)).astype(jp.float32)  # reach 任务主终止只保留 success/collision/timeout。
 
         metrics = {
             **state.metrics,  # 保留包装器维护的统计项，避免评估阶段的 metrics 结构变化。
@@ -511,7 +508,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             "ee_speed": ee_speed,
             "success": success.astype(jp.float32),
             "collision": collision.astype(jp.float32),
-            "runaway": runaway.astype(jp.float32),
+            "runaway": runaway_seen.astype(jp.float32),
             "timeout": timeout.astype(jp.float32),
             "raw_collision_contacts": raw_collision_contacts,
         }
@@ -526,6 +523,7 @@ class UR5ReachWarpEnv(mjx_env.MjxEnv):
             "prev_ee_pos": ee_pos,
             "task_step": task_step,
             "success_threshold": current_success_threshold,
+            "runaway_seen": runaway_seen.astype(jp.float32),
         }
         return mjx_env.State(data=data, obs=obs, reward=reward, done=done, metrics=metrics, info=info)
 

@@ -134,10 +134,10 @@ class MujocoEnvConfig:
     success_speed_bonus_slow: float = 1000.0
     success_speed_bonus_medium: float = 500.0
     collision_penalty_value: float = 8000.0  # 碰撞惩罚；提高后让“撞上去结束”更难成为局部最优。
-    runaway_distance_threshold: float = 2.0  # 末端离目标过远时判定为跑飞，避免长回合把负奖励滚到百万级。
-    runaway_ee_speed_threshold: float = 4.0  # 末端速度超过该阈值时视为数值或控制异常。
-    runaway_joint_velocity_threshold: float = 12.0  # 任一关节速度过大时终止回合，避免姿态持续发散。
-    runaway_penalty_value: float = 3000.0  # 跑飞固定惩罚，用于把“发散失败”和普通退步区分开。
+    runaway_distance_threshold: float = 2.0  # 跑飞阈值现在只做诊断标记，不再作为主终止条件。
+    runaway_ee_speed_threshold: float = 4.0  # 末端速度超过该阈值时记录为“跑飞预警”。
+    runaway_joint_velocity_threshold: float = 12.0  # 任一关节速度过大时记录为“跑飞预警”。
+    runaway_penalty_value: float = 3000.0  # 兼容旧版 reward_info 字段，当前不再实际扣分。
     # 渲染相机参数。
     render_camera_name: str = "workbench_camera"
     viewer_lock_camera: bool = False
@@ -274,6 +274,7 @@ class UR5MujocoEnv(gym.Env):
         self.episode_count = 0  # 课程学习靠回合数推进，不靠成功率回推。
         self.curriculum_stage = "stage1_fixed"
         self._phase_rewards_given: set[float] = set()
+        self.episode_runaway_seen = False  # 记录本回合是否曾出现过“明显发散”迹象，用于训练日志诊断。
 
     def _set_home_pose(self) -> None:
         """设置稳定的初始关节姿态。"""
@@ -574,6 +575,7 @@ class UR5MujocoEnv(gym.Env):
         self.step_count = 0
         self._phase_rewards_given.clear()
         self.current_ee_vel[:] = 0.0
+        self.episode_runaway_seen = False
 
         # 重力补偿电机使用固定控制量。
         if self.config.enable_gravity_motors:
@@ -598,6 +600,7 @@ class UR5MujocoEnv(gym.Env):
             "episode_index": int(self.episode_count),
             "success_threshold": self._current_success_threshold(),
             "physics_backend": self.physics_backend,
+            "done_reason": "reset",
         }
         # 课程计数器在 episode 初始化完成后 +1。
         self.episode_count += 1
@@ -708,7 +711,9 @@ class UR5MujocoEnv(gym.Env):
             idle_penalty = -float(self.config.idle_penalty_value)
             reward += idle_penalty
 
-        # 跑飞保护用于截断“既不成功也不碰撞，只是持续发散”的长回合坏解。
+        # 跑飞现在只作为诊断信号保留：
+        # 1) 帮我们区分“超时前一直较稳定”还是“中途已经明显发散”；
+        # 2) 不再直接终止或罚大分，避免把训练主逻辑变成“防跑飞”而不是“学会成功”。
         runaway_detected = (
             distance > float(self.config.runaway_distance_threshold)
             or ee_speed > float(self.config.runaway_ee_speed_threshold)
@@ -717,10 +722,8 @@ class UR5MujocoEnv(gym.Env):
             or not np.isfinite(ee_speed)
             or not np.all(np.isfinite(joint_vel))
         )
+        self.episode_runaway_seen = bool(self.episode_runaway_seen or runaway_detected)
         runaway_penalty = 0.0
-        if runaway_detected:
-            runaway_penalty = -float(self.config.runaway_penalty_value)
-            reward += runaway_penalty
 
         collision_detected = False
         collision_contacts, raw_collision_contacts = self._count_hazardous_contacts()
@@ -732,7 +735,7 @@ class UR5MujocoEnv(gym.Env):
 
         current_success_threshold = self._current_success_threshold()
         success = distance <= current_success_threshold
-        terminated = bool(success or collision_detected or runaway_detected)
+        terminated = bool(success or collision_detected)
         truncated = self.step_count >= int(self.config.max_steps)
         timeout = bool(truncated and not terminated)
 
@@ -741,6 +744,7 @@ class UR5MujocoEnv(gym.Env):
         success_speed_reward = 0.0
         collision_remaining_step_penalty = 0.0
         runaway_remaining_step_penalty = 0.0
+        done_reason = "running"
         if success:
             success_reward = float(self.config.success_bonus)
             success_remaining_step_reward = float(self.config.success_remaining_step_gain) * float(self.config.max_steps - self.step_count)
@@ -751,13 +755,13 @@ class UR5MujocoEnv(gym.Env):
             elif ee_speed < 0.1:
                 success_speed_reward = float(self.config.success_speed_bonus_medium)
             reward += success_reward + success_remaining_step_reward + success_speed_reward
+            done_reason = "success"
         elif collision_detected:
             collision_remaining_step_penalty = -float(self.config.step_penalty) * float(self.config.max_steps - self.step_count)
             reward += collision_remaining_step_penalty
-        elif runaway_detected:
-            # 跑飞后同步扣掉剩余时间惩罚，让“尽快结束发散轨迹”比继续乱跑更划算。
-            runaway_remaining_step_penalty = -float(self.config.step_penalty) * float(self.config.max_steps - self.step_count)
-            reward += runaway_remaining_step_penalty
+            done_reason = "collision"
+        elif timeout:
+            done_reason = "timeout"
 
         info = {
             "distance": distance,
@@ -766,13 +770,14 @@ class UR5MujocoEnv(gym.Env):
             "physics_backend": self.physics_backend,
             "ee_speed": ee_speed,
             "collision": collision_detected,
-            "runaway": runaway_detected,
+            "runaway": self.episode_runaway_seen,
             "timeout": timeout,
             "collision_contacts": collision_contacts,
             "raw_collision_contacts": raw_collision_contacts,
             "curriculum_stage": self.curriculum_stage,
             "episode_index": int(self.episode_count),
             "success_threshold": current_success_threshold,
+            "done_reason": done_reason,
             "reward_info": {
                 "step_penalty": -float(self.config.step_penalty),
                 "improvement_reward": improvement_reward,

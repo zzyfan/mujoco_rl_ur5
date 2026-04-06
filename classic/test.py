@@ -57,9 +57,13 @@ def parse_args():
     parser.add_argument("--no-render", action="store_false", dest="render", help="关闭渲染")
     parser.set_defaults(render=False)
     parser.add_argument("--render-mode", choices=["human", "rgb_array"], default="human")  # `human` 适合看动作，`rgb_array` 适合录制。
+    parser.add_argument("--render-sleep", type=float, default=0.05)  # `human` 模式每步额外暂停多久；调大后更容易看清失败过程。
     parser.add_argument("--random-policy", action="store_true", help="不加载模型，使用随机动作测试环境")  # 用来确认环境本身没坏。
     parser.add_argument("--print-step-reward", action="store_true", help="打印每一步奖励与关键信息")
     parser.add_argument("--print-reward-info", action="store_true", help="打印环境 info 里的奖励分项（若存在）")
+    parser.add_argument("--fixed-target-x", type=float, default=None, help="测试时强制固定目标点 x")
+    parser.add_argument("--fixed-target-y", type=float, default=None, help="测试时强制固定目标点 y")
+    parser.add_argument("--fixed-target-z", type=float, default=None, help="测试时强制固定目标点 z")
     return parser.parse_args()
 
 
@@ -93,6 +97,9 @@ def main():
         render=bool(args.render),
         render_mode=args.render_mode,
         max_steps=args.max_steps,
+        fixed_target_x=args.fixed_target_x,
+        fixed_target_y=args.fixed_target_y,
+        fixed_target_z=args.fixed_target_z,
     )
 
     env = None
@@ -128,6 +135,7 @@ def main():
             done = np.array([False], dtype=bool)
             total_reward = 0.0
             steps = 0
+            last_done_reason = "running"
             while not bool(done[0]) and steps < args.max_steps:
                 if model is None:
                     action = np.array([env.action_space.sample()])  # 随机策略主要用来排查环境接口，不看效果。
@@ -143,17 +151,23 @@ def main():
                     info0 = info[0] if isinstance(info, (list, tuple)) and len(info) > 0 else {}
                     distance = info0.get("distance")
                     success = info0.get("success")
+                    runaway = info0.get("runaway")
+                    done_reason = info0.get("done_reason", "running")
+                    last_done_reason = str(done_reason)
                     if distance is None:
                         print(f"[step {steps}] reward={step_reward:.6f}")
                     else:
-                        print(f"[step {steps}] reward={step_reward:.6f}, distance={float(distance):.6f}, success={bool(success)}")
+                        print(
+                            f"[step {steps}] reward={step_reward:.6f}, distance={float(distance):.6f}, "
+                            f"success={bool(success)}, runaway={bool(runaway)}, done_reason={done_reason}"
+                        )
                     if args.print_reward_info:
                         reward_info = info0.get("reward_info")  # 环境若返回奖励分项，则在这里打印。
                         if isinstance(reward_info, dict):
                             print(f"  reward_info={reward_info}")
                 if args.render and args.render_mode == "human":
-                    time.sleep(0.01)  # 给 viewer 一点刷新时间，否则机械臂动作会快到看不清。
-            print(f"Episode {ep + 1}: steps={steps}, reward={total_reward:.3f}")  # 先看回合总回报，再结合 step 日志看失败原因。
+                    time.sleep(max(float(args.render_sleep), 0.0))  # 放慢可视化速度，方便观察失败或成功的最后几步。
+            print(f"Episode {ep + 1}: steps={steps}, reward={total_reward:.3f}, done_reason={last_done_reason}")  # 先看回合总回报，再结合 done_reason 判断失败类型。
     finally:
         if env is not None:
             env.close()

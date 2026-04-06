@@ -52,6 +52,24 @@ python classic/test.py \
   --render
 ```
 
+固定目标点慢速调试：
+
+```bash
+python classic/test.py \
+  --algo sac \
+  --robot ur5_cxy \
+  --run-name exp_sac \
+  --episodes 1 \
+  --render \
+  --render-mode human \
+  --render-sleep 0.1 \
+  --fixed-target-x -0.78 \
+  --fixed-target-y 0.32 \
+  --fixed-target-z 0.18 \
+  --print-step-reward \
+  --print-reward-info
+```
+
 ## 训练线说明
 
 ### `classic/`
@@ -74,6 +92,7 @@ python classic/test.py \
 - 支持 `--legacy-zero-ee-velocity` 旧版速度读取开关
 - `ur5_cxy` 模型已将视觉 `mesh` 和代理碰撞体分离，减少复杂网格碰撞带来的训练噪声
 - 碰撞失败判定只统计机器人与外部危险几何的接触，不再把目标球、灯光或机器人内部自接触直接当作失败
+- `runaway` 现在只作为诊断指标保留，不再直接终止回合或施加大额失败罚分
 
 ### `warp_gpu/`
 
@@ -120,6 +139,7 @@ python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --epi
 - `warp_gpu/`：除了进度条，还会打印 Brax 回调返回的关键指标，例如 `eval_episode_reward / episode_sum_reward / distance / success / collision / runaway / timeout`
 - 训练结束时两条线都会额外打印最后一次可用回报
 - `collision_rate` 现在对应“过滤后的危险碰撞率”；若需要对照原始 MuJoCo 接触数，可查看 `info['raw_collision_contacts']`
+- `runaway_rate` 现在表示“回合内曾出现明显发散迹象的比例”，用于诊断而不是直接判失败
 
 如果只想看新增日志，可以在服务器上配合：
 

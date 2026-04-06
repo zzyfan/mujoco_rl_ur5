@@ -13,9 +13,9 @@
 
 ## `classic/`
 
-- `env.py`：Gymnasium 环境、奖励、课程学习、渲染
+- `env.py`：Gymnasium 环境、奖励、课程学习、渲染、终止原因诊断
 - `train.py`：训练、评估、中断保存、继续训练、阶段训练日志
-- `test.py`：推理测试和随机策略冒烟
+- `test.py`：推理测试、固定目标调试、慢速渲染和随机策略冒烟
 
 适用场景：
 
@@ -27,7 +27,7 @@
 
 - `runtime.py`：Warp CUDA 运行时检测与设备初始化
 - `smoke.py`：轻量自检与 smoke test
-- `env.py`：Warp GPU reach 环境
+- `env.py`：Warp GPU reach 环境、课程采样和失败类型诊断
 - `train.py`：Playground / Brax 训练入口、进度条和阶段训练日志
 - `test.py`：Warp GPU 策略推理测试（final_policy 或 checkpoint）
 

@@ -202,3 +202,32 @@
 - 夹爪和腕部代理碰撞体还能继续贴合
 - 总队列训练建议使用单独 logfile，避免不同算法输出混写
 - `warp` 的固定文本进度展示可以继续替代动态条，方便服务器日志查看
+
+## 版本 9：把跑飞从主失败逻辑降回诊断信号
+
+目标：
+- 参考 `MuJoCo_RL_UR5`、`panda-gym`、`Gymnasium-Robotics` 等项目，把训练主线重新收回到 `success / collision / timeout`。
+- 避免 `runaway` 大罚分和强制终止盖过“先学会成功一次”的任务主线。
+
+实现：
+- 在 [classic/env.py](/home/zzyfan/mujoco_ur5_rl/classic/env.py) 中，`runaway` 不再直接终止回合，也不再写入大额固定罚分。
+- 在 [warp_gpu/env.py](/home/zzyfan/mujoco_ur5_rl/warp_gpu/env.py) 中，`runaway` 同样退回为“回合内是否出现过明显发散迹象”的诊断指标。
+- 在 [classic/test.py](/home/zzyfan/mujoco_ur5_rl/classic/test.py) 中新增：
+  - `--render-sleep`
+  - `--fixed-target-x / y / z`
+  - `done_reason` 输出
+
+作用：
+- 训练主逻辑重新聚焦到：
+  - 成功到点
+  - 危险碰撞失败
+  - 超时失败
+- `runaway` 继续保留可见性，方便判断“虽然没终止，但策略已经明显发散”的坏轨迹。
+- 测试时可以固定目标点并放慢可视化速度，更容易定位第一步失败原因。
+
+## 下一步最值得继续吸收的设计
+
+- `goal-conditioned` 观测结构
+- `HER` 作为 reach 任务强基线
+- 比纯扭矩更容易学的控制模式（例如 `joint position delta`）
+- 更清晰的 `done_reason` / success 指标输出
