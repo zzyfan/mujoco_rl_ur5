@@ -8,6 +8,8 @@
 - `warp_gpu/`：Warp GPU + MuJoCo Playground / Brax 训练线
 - `assets/`：MuJoCo XML、网格和纹理资源
 - `docs/`：补充说明
+- `server_scripts/`：服务器端直接执行的训练队列脚本
+- `scripts/`：本地辅助脚本，例如模型回传、状态轮询
 - `requirements.txt`：Python 依赖
 - `Dockerfile`：容器化运行环境
 
@@ -70,3 +72,19 @@ logs/classic/{algo}/{robot}/{run_name}/
 ```text
 models/warp_gpu/{algo}/{robot}/{run_name}/
 ```
+
+## 服务器脚本
+
+- `server_scripts/run_total_queue.sh`
+  - 用于在服务器里直接通过 `screen` 启动整轮训练
+  - 当前队列顺序是：
+    1. `warp PPO sparse + joint_position_delta + fixed target`
+    2. `warp SAC sparse + joint_position_delta + fixed target`
+    3. `classic SAC + HER + sparse + joint_position_delta`
+    4. `classic TD3 + HER + sparse + joint_position_delta`
+
+- `scripts/auto_fetch_remote_models.py`
+  - 本地模型回传脚本
+  - 现在支持按预设下载不同轮次的产物：
+    - `legacy_total_queue`
+    - `gc_total_queue`

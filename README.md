@@ -124,6 +124,7 @@ python classic/test.py \
 - `warp_gpu/env.py` 与 `classic/env.py` 现在使用同一套危险碰撞过滤逻辑：忽略目标球、灯光和机器人内部自接触
 - `warp_gpu/` 当前支持“分阶段启动”的课程学习：先用固定目标训练，再切到小范围随机和全范围随机
 - `warp_gpu/` 现在也支持 `dense / sparse` 奖励切换；其中 `sparse` 更适合做 success/fail 主导的对照实验
+- 项目提供 [server_scripts/run_total_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_total_queue.sh) 作为服务器端 `screen` 队列脚本，可直接在远端启动整轮训练
 
 示例：
 
@@ -134,6 +135,29 @@ python -m warp_gpu.train --algo sac --robot ur5_cxy --num-envs 16 --num-eval-env
 python -m warp_gpu.train --algo sac --robot ur5_cxy --reward-mode sparse --controller-mode joint_position_delta --target-sampling-mode fixed --num-envs 256
 python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --episodes 3
 python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --episodes 1 --render --render-mode human
+```
+
+服务器端直接跑整轮训练：
+
+```bash
+cd /root/autodl-tmp/mujoco_rl_ur5
+screen -U -S total_queue
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate mujoco
+bash server_scripts/run_total_queue.sh
+```
+
+本地回拉当前新版整轮产物：
+
+```bash
+python scripts/auto_fetch_remote_models.py \
+  --host connect.bjb2.seetacloud.com \
+  --port 47627 \
+  --user root \
+  --password '你的密码' \
+  --remote-root /root/autodl-tmp/mujoco_rl_ur5 \
+  --local-root downloads/remote_models \
+  --preset gc_total_queue
 ```
 
 ## 训练日志

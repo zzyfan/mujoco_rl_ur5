@@ -74,3 +74,17 @@
 2. 先在固定目标阶段拿到第一次成功
 3. 再切到小范围随机和全范围随机
 4. `warp_gpu` 继续保留做高吞吐并行训练对照
+
+## 2026-04 当前阶段补充：warp sparse 与服务器队列脚本
+
+- `warp_gpu` 新增 `reward_mode`：
+  - `dense`
+  - `sparse`
+- `warp_gpu/train.py` 和 `warp_gpu/test.py` 同步支持 `--reward-mode`
+- 新增 [run_total_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_total_queue.sh)
+  - 用于服务器端 `screen` 直接启动整轮训练
+  - 当前队列默认按“warp sparse 对照 -> classic HER 主线”的顺序运行
+- `scripts/auto_fetch_remote_models.py` 新增预设：
+  - `legacy_total_queue`
+  - `gc_total_queue`
+  方便按不同轮次批量回传模型
