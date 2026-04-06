@@ -340,3 +340,38 @@
 - 所以当前推荐分工是：
   - `classic`：goal-conditioned + HER 主线
   - `warp_gpu`：高吞吐 dense/sparse 对照线
+
+## 版本 12：HER 启动保护与镜像式模型回传
+
+目标：
+- 修复 `HER + VecEnv` 在第一批完整 episode 落盘前就开始采样的问题。
+- 让下载回本地的模型默认按用途归位，而不是全部平铺到同一层目录。
+
+实现：
+
+### 1. classic 的 HER 启动保护
+
+在 [classic/train.py](/home/zzyfan/mujoco_ur5_rl/classic/train.py) 中，当启用 `--use-her` 时，自动保证：
+
+- `learning_starts >= max_steps * n_envs`
+
+说明：
+- 这是因为 SB3 在 VecEnv 里统计的是“总环境步数”。
+- 并行环境越多，想等到第一批完整 episode 全部写入回放池，需要的总步数也越高。
+
+### 2. 模型回传脚本支持目录镜像
+
+在 [scripts/auto_fetch_remote_models.py](/home/zzyfan/mujoco_ur5_rl/scripts/auto_fetch_remote_models.py) 中新增：
+
+- `--layout mirror`
+- `--layout artifact`
+
+其中：
+- `mirror`：按远端目录结构镜像到本地
+- `artifact`：兼容旧版按预设名平铺目录
+
+作用：
+- 避免 `HerReplayBuffer` 在还没有完整 episode 时抛出采样异常。
+- 让模型默认落到：
+  - `downloads/remote_models/models/...`
+  - `downloads/remote_models/logs/.../best_model`

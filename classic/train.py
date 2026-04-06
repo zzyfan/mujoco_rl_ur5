@@ -362,6 +362,13 @@ def _apply_goal_conditioned_preset(args: TrainArgs) -> None:
         if args.reward_mode != "sparse":
             args.reward_mode = "sparse"
             applied.append("reward_mode=sparse")
+        # HER 需要先看到至少一批完整 episode，才能从回放池里重标记 goal。
+        # 对 VecEnv 来说，`learning_starts` 统计的是总环境步数，所以并行环境越多，
+        # 为了等到“所有环境都至少结束过第一局”，安全下限就越高。
+        her_min_learning_starts = max(int(args.max_steps) * int(args.n_envs), int(args.max_steps))
+        if int(args.learning_starts) < her_min_learning_starts:
+            args.learning_starts = her_min_learning_starts
+            applied.append(f"learning_starts={her_min_learning_starts}")
     if applied:
         print(f"已应用 goal-conditioned/HER 参数: {', '.join(applied)}")
 

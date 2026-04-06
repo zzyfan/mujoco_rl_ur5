@@ -160,6 +160,17 @@ python scripts/auto_fetch_remote_models.py \
   --preset gc_total_queue
 ```
 
+默认会按远端目录镜像到本地，也就是产物会归位到：
+
+- `downloads/remote_models/models/...`
+- `downloads/remote_models/logs/.../best_model`
+
+如果你想兼容旧版“按预设名平铺目录”的方式，再额外加：
+
+```bash
+--layout artifact
+```
+
 ## 训练日志
 
 `classic/` 和 `warp_gpu/` 现在都会在训练过程中打印阶段日志。

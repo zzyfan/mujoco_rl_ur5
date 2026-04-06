@@ -121,9 +121,13 @@ def _download_artifact(
     local_root: Path,
     artifact_name: str,
     rel_dir: str,
+    layout: str,
 ) -> None:
     remote_dir = posixpath.join(remote_root, rel_dir)
-    local_dir = local_root / artifact_name
+    if layout == "artifact":
+        local_dir = local_root / artifact_name
+    else:
+        local_dir = local_root / Path(rel_dir)
     _download_dir(sftp, remote_dir, local_dir)
 
 
@@ -136,6 +140,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--remote-root", required=True)
     parser.add_argument("--local-root", default="downloads/remote_models")
     parser.add_argument("--poll-seconds", type=int, default=30)
+    parser.add_argument(
+        "--layout",
+        choices=("mirror", "artifact"),
+        default="mirror",
+        help="本地落盘方式：mirror 按远端目录镜像；artifact 按预设名平铺。",
+    )
     parser.add_argument(
         "--preset",
         choices=tuple(ARTIFACT_PRESETS.keys()),
@@ -171,9 +181,10 @@ def main() -> int:
                     continue
                 if _artifact_ready(sftp, args.remote_root, rel_dir, required_files):
                     print(f"[ready] {artifact_name}: {rel_dir}", flush=True)
-                    _download_artifact(sftp, args.remote_root, local_root, artifact_name, rel_dir)
+                    _download_artifact(sftp, args.remote_root, local_root, artifact_name, rel_dir, args.layout)
                     downloaded.add(artifact_name)
-                    print(f"[downloaded] {artifact_name} -> {local_root / artifact_name}", flush=True)
+                    target_dir = (local_root / artifact_name) if args.layout == "artifact" else (local_root / Path(rel_dir))
+                    print(f"[downloaded] {artifact_name} -> {target_dir}", flush=True)
             if len(downloaded) < len(artifacts):
                 print(
                     f"[poll] preset={args.preset} downloaded={len(downloaded)}/{len(artifacts)} waiting={args.poll_seconds}s",

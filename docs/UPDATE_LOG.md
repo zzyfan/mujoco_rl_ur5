@@ -88,3 +88,15 @@
   - `legacy_total_queue`
   - `gc_total_queue`
   方便按不同轮次批量回传模型
+
+## 2026-04 HER 采样保护与模型回传归位
+
+- `classic/train.py`
+  - 启用 `--use-her` 时自动提升 `learning_starts`
+  - 确保并行环境在首次 HER 采样前，至少已经产生一批完整 episode
+- `scripts/auto_fetch_remote_models.py`
+  - 默认按远端目录镜像到本地
+  - 模型会落到 `downloads/remote_models/models/...`
+  - `best_model` 会落到 `downloads/remote_models/logs/.../best_model`
+- 如需兼容旧版平铺下载结构，可继续使用：
+  - `--layout artifact`
