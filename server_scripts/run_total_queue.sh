@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 远端 screen 队列脚本：
 # 1. 先跑 Warp 线，验证高吞吐 dense/sparse 对照
-# 2. 再跑 classic 线，验证 goal-conditioned + HER 主线
+# 2. 再跑 classic 线，先验证 HER 主线，再补一条 PPO 对照
 #
 # 这个脚本会在服务器端直接执行，所以只依赖：
 # - 远端仓库代码
@@ -104,6 +104,23 @@ python classic/train.py \
   --controller-mode joint_position_delta \
   --goal-conditioned \
   --use-her \
+  --reward-mode sparse \
+  --success-threshold 0.01 \
+  --stage1-success-threshold 0.05 \
+  --stage2-success-threshold 0.03 \
+  --no-render
+
+echo "[queue] classic PPO goal-conditioned start $(date '+%F %T')"
+python classic/train.py \
+  --algo ppo \
+  --robot ur5_cxy \
+  --run-name server_classic_ppo_gc \
+  --n-envs 256 \
+  --batch-size 1024 \
+  --frame-skip 2 \
+  --device cuda \
+  --controller-mode joint_position_delta \
+  --goal-conditioned \
   --reward-mode sparse \
   --success-threshold 0.01 \
   --stage1-success-threshold 0.05 \

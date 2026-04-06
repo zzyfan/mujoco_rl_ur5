@@ -124,7 +124,7 @@ python classic/test.py \
 - `warp_gpu/env.py` 与 `classic/env.py` 现在使用同一套危险碰撞过滤逻辑：忽略目标球、灯光和机器人内部自接触
 - `warp_gpu/` 当前支持“分阶段启动”的课程学习：先用固定目标训练，再切到小范围随机和全范围随机
 - `warp_gpu/` 现在也支持 `dense / sparse` 奖励切换；其中 `sparse` 更适合做 success/fail 主导的对照实验
-- 项目提供 [server_scripts/run_total_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_total_queue.sh) 作为服务器端 `screen` 队列脚本，可直接在远端启动整轮训练
+- 项目提供 [server_scripts/run_total_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_total_queue.sh) 作为服务器端 `screen` 队列脚本，可直接在远端启动整轮训练；当前顺序是 `warp PPO -> warp SAC -> classic SAC+HER -> classic TD3+HER -> classic PPO`
 
 示例：
 

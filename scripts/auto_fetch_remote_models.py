@@ -79,6 +79,14 @@ ARTIFACT_PRESETS = {
             "logs/classic/td3/ur5_cxy/server_classic_td3_her/best_model",
             ("best_model.zip", "vec_normalize.pkl"),
         ),
+        "classic_ppo_gc_final": (
+            "models/classic/ppo/ur5_cxy/server_classic_ppo_gc/final",
+            ("model.zip", "vec_normalize.pkl"),
+        ),
+        "classic_ppo_gc_best": (
+            "logs/classic/ppo/ur5_cxy/server_classic_ppo_gc/best_model",
+            ("best_model.zip", "vec_normalize.pkl"),
+        ),
     },
 }
 

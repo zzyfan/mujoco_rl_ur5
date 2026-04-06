@@ -89,7 +89,7 @@
 - `warp_gpu/train.py` 和 `warp_gpu/test.py` 同步支持 `--reward-mode`
 - 新增 [run_total_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_total_queue.sh)
   - 用于服务器端 `screen` 直接启动整轮训练
-  - 当前队列默认按“warp sparse 对照 -> classic HER 主线”的顺序运行
+  - 当前队列默认按“warp sparse 对照 -> classic HER 主线 -> classic PPO 对照”的顺序运行
 - `scripts/auto_fetch_remote_models.py` 新增预设：
   - `legacy_total_queue`
   - `gc_total_queue`

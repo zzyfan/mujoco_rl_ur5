@@ -355,6 +355,13 @@
   - `classic`：goal-conditioned + HER 主线
   - `warp_gpu`：高吞吐 dense/sparse 对照线
 
+补充：
+- 服务器整轮队列现在把 `classic PPO` 也追加到了最后，作为：
+  - `goal-conditioned`
+  - `joint_position_delta`
+  - `sparse reward`
+ 这套设置下的 on-policy 对照实验。
+
 ## 版本 12：HER 启动保护与镜像式模型回传
 
 目标：
