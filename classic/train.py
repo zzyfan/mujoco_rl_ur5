@@ -237,6 +237,14 @@ class TrainingLogCallback(BaseCallback):
             return None
         return float(np.mean(values))
 
+    @staticmethod
+    def _count_summary(values: deque[float]) -> tuple[int, int] | None:
+        """把 0/1 标记压成 `命中次数/窗口大小`，方便直接查看成功次数。"""
+        if not values:
+            return None
+        positives = int(sum(float(v) > 0.5 for v in values))
+        return positives, len(values)
+
     def _on_step(self) -> bool:
         self._maybe_append_episode_stats()
         if self.num_timesteps < self.next_log_timestep:
@@ -259,12 +267,24 @@ class TrainingLogCallback(BaseCallback):
             parts.append(f"recent_distance={recent_distance:.4f}")
         if success_rate is not None:
             parts.append(f"success_rate={success_rate:.2%}")
+            success_count = self._count_summary(self.recent_successes)
+            if success_count is not None:
+                parts.append(f"success_count={success_count[0]}/{success_count[1]}")
         if collision_rate is not None:
             parts.append(f"collision_rate={collision_rate:.2%}")
+            collision_count = self._count_summary(self.recent_collisions)
+            if collision_count is not None:
+                parts.append(f"collision_count={collision_count[0]}/{collision_count[1]}")
         if runaway_rate is not None:
             parts.append(f"runaway_rate={runaway_rate:.2%}")
+            runaway_count = self._count_summary(self.recent_runaways)
+            if runaway_count is not None:
+                parts.append(f"runaway_count={runaway_count[0]}/{runaway_count[1]}")
         if timeout_rate is not None:
             parts.append(f"timeout_rate={timeout_rate:.2%}")
+            timeout_count = self._count_summary(self.recent_timeouts)
+            if timeout_count is not None:
+                parts.append(f"timeout_count={timeout_count[0]}/{timeout_count[1]}")
         if self.recent_done_reasons:
             counts = Counter(self.recent_done_reasons)
             reason_summary = ",".join(f"{key}:{counts[key]}" for key in sorted(counts))

@@ -284,6 +284,11 @@
 ### 4. 日志与测试诊断进一步加强
 
 - 训练日志新增 `done_reasons=...`
+- `classic` 训练日志新增：
+  - `success_count`
+  - `collision_count`
+  - `runaway_count`
+  - `timeout_count`
 - 测试脚本支持：
   - 固定目标点
   - 慢速渲染

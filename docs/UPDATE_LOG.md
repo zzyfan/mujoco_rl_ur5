@@ -67,6 +67,11 @@
 - `classic` 新增 `dense / sparse` 奖励模式切换。
 - `classic` 和 `warp_gpu` 都新增 `joint_position_delta` 控制模式。
 - 训练日志增加 `done_reasons=...` 汇总，方便直接判断当前主要失败类型。
+- `classic` 训练日志现在还会打印：
+  - `success_count`
+  - `collision_count`
+  - `runaway_count`
+  - `timeout_count`
 
 ## 当前推荐优先级
 

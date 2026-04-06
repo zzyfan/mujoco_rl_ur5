@@ -187,7 +187,7 @@ python scripts/auto_fetch_remote_models.py \
 
 `classic/` 和 `warp_gpu/` 现在都会在训练过程中打印阶段日志。
 
-- `classic/`：按时间步输出最近窗口内的 `recent_reward / recent_ep_len / recent_distance / success_rate / collision_rate / runaway_rate / timeout_rate`，若开启评估还会附带 `eval_reward`
+- `classic/`：按时间步输出最近窗口内的 `recent_reward / recent_ep_len / recent_distance / success_rate / success_count / collision_rate / collision_count / runaway_rate / runaway_count / timeout_rate / timeout_count`，若开启评估还会附带 `eval_reward`
 - `classic/` 训练时若把 `n_envs / batch_size / gradient_steps` 设得过大，会自动收回到更适合 CPU MuJoCo 吞吐的区间；当前吞吐优先档默认会把 `frame_skip` 拉到 `2`
 - `warp_gpu/`：除了进度条，还会打印 Brax 回调返回的关键指标，例如 `eval_episode_reward / episode_sum_reward / distance / success / collision / runaway / timeout`
 - `warp_gpu/` 现在建议优先组合：
@@ -198,7 +198,7 @@ python scripts/auto_fetch_remote_models.py \
 - 训练结束时两条线都会额外打印最后一次可用回报
 - `collision_rate` 现在对应“过滤后的危险碰撞率”；若需要对照原始 MuJoCo 接触数，可查看 `info['raw_collision_contacts']`
 - `runaway_rate` 现在表示“回合内曾出现明显发散迹象的比例”，用于诊断而不是直接判失败
-- `classic/` 现在还会按最近回合输出 `done_reasons=...` 汇总，方便区分 success / collision / timeout
+- `classic/` 现在还会按最近回合输出 `done_reasons=...` 汇总，并补充 `success_count=3/20` 这类次数字段，方便直接判断最近窗口里到底成功了几次
 
 如果只想看新增日志，可以在服务器上配合：
 
