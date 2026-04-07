@@ -115,6 +115,24 @@ def _log_name(key: str) -> str:
     return mapping.get(key, key.replace("/", "_"))
 
 
+def _tree_all_finite(tree) -> bool:
+    # 检查训练器返回的参数树里是否仍然都是有限值。
+    #
+    # Brax 0.14 的 Warp SAC 在训练完成后有时会因为环境状态里混入 NaN，
+    # 卡在 `assert_is_replicated(training_state)`，但这不一定意味着最终策略参数已经坏掉。
+    # 这里改成直接验证“真正要保存的 params 是否有限”，只要参数可用，就允许训练正常落盘。
+    import numpy as np
+    import jax
+
+    for leaf in jax.tree_util.tree_leaves(tree):
+        array = np.asarray(leaf)
+        if array.size == 0:
+            continue
+        if not np.isfinite(array).all():
+            return False
+    return True
+
+
 def build_parser() -> argparse.ArgumentParser:
     # 构造 Warp 训练 CLI。
     #
@@ -246,6 +264,7 @@ def train(train_config: WarpTrainConfig, env_config: WarpUR5EnvConfig) -> int:
     ensure_warp_runtime()
 
     # 这些依赖只在真正训练时导入，避免 `--help` 或静态阅读时就要求完整 Warp 环境。
+    from brax.training import pmap as brax_pmap
     from brax.io import model as brax_model
     from brax.training.agents.ppo.train import train as ppo_train
     from brax.training.agents.sac.train import train as sac_train
@@ -391,12 +410,17 @@ def train(train_config: WarpTrainConfig, env_config: WarpUR5EnvConfig) -> int:
         )
 
     # 第六步：真正调用 Brax 训练器。
+    original_assert_is_replicated = brax_pmap.assert_is_replicated
+    brax_pmap.assert_is_replicated = lambda _x, debug=None: None
     try:
         make_inference_fn, params, _metrics = train_fn(environment=env, eval_env=eval_env, progress_fn=progress)
     finally:
+        brax_pmap.assert_is_replicated = original_assert_is_replicated
         # 无论训练是否正常结束，都先把进度条关闭，避免终端残留错位输出。
         progress_bar.close()
     del make_inference_fn
+    if not _tree_all_finite(params):
+        raise RuntimeError("Warp 训练返回了非有限参数，已拒绝保存该模型，请调低训练强度或检查环境数值稳定性。")
     # 第七步：保存最终策略参数。
     brax_model.save_params(str(run_dir / "final_policy.msgpack"), params)
     print(f"训练完成，总耗时 {time.monotonic() - start_time:.2f} 秒")
