@@ -15,11 +15,9 @@ venv/
 env/
 
 # Training artifacts (very large)
-models/
-models_mjx/
-logs/
-logs_mjx/
+runs/
 tensorboard/
+.ipynb_checkpoints/
 
 # System files
 .DS_Store

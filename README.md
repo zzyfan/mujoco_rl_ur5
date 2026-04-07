@@ -1,451 +1,310 @@
-# MuJoCo UR5 RL
+# UR5 Reach Reinforcement Learning Project
 
-纯 MuJoCo 机械臂强化学习项目，当前包含三条训练线：
+## Overview
 
-- `classic/`：成功率主线，基于 Gymnasium + Stable-Baselines3
-- `warp_gpu/`：Warp GPU 高吞吐验证线
-- `sbx_runner/`：JAX 算法层实验线（SBX）
+本仓库实现 `UR5` 到点任务的强化学习训练与测试流程，包含主线 MuJoCo + Stable-Baselines3 实现，以及可选的纯 GPU Warp 训练线。
 
-当前仓库支持两套机械臂模型：
+项目内容聚焦以下方向：
+- `UR5` 到点任务环境与训练入口
+- 面向学习的代码注释、参数说明和实现文档
+- 兼顾本地调试、服务器训练和跨机器迁移的目录与配置设计
 
-- `ur5_cxy`
-- `zero_robotiq`
+## Project Structure
 
-补充文档：
+```text
+assets/
+  robotiq_cxy/
+    lab_env.xml
+    meshes/
+docs/
+  IMPLEMENTATION_GUIDE.md
+  LIBRARY_USAGE.md
+  PARAMETER_REFERENCE.md
+  PORTABILITY.md
+  WARP_IMPLEMENTATION_GUIDE.md
+  WARP_PARAMETER_REFERENCE.md
+notebooks/
+  01_code_learning_walkthrough.ipynb
+  02_parameter_reference.ipynb
+  03_warp_code_learning_walkthrough.ipynb
+  04_cli_parameter_guide.ipynb
+  05_library_usage_guide.ipynb
+train_ur5_reach.py
+ur5_reach_config.py
+ur5_reach_env.py
+train_ur5_reach_warp.py
+test_ur5_reach_warp.py
+warp_ur5_config.py
+warp_ur5_env.py
+warp_ur5_runtime.py
+requirements.txt
+requirements-warp.txt
+Dockerfile
+```
 
-- [训练改进记录](/home/zzyfan/mujoco_ur5_rl/docs/TRAINING_IMPROVEMENTS.md)
-- [更新日志](/home/zzyfan/mujoco_ur5_rl/docs/UPDATE_LOG.md)
+## Robot Model
 
-## 快速开始
+当前机械臂模型保存在仓库内相对路径：
 
-安装依赖：
+```text
+assets/robotiq_cxy/lab_env.xml
+assets/robotiq_cxy/meshes/
+```
+
+说明：
+- `lab_env.xml` 是主线和 Warp 训练线共同使用的 MuJoCo 场景与机械臂模型入口。
+- `meshes/` 目录保存 UR5 与 Robotiq 夹爪所需的网格文件。
+- 训练脚本通过配置中的 `model_xml` 相对路径加载模型，不依赖当前终端所在目录。
+
+## Main Pipeline
+
+`ur5_reach_config.py`
+- 定义环境参数、训练参数、产物路径规则。
+- 维护参数说明字典，方便 Jupyter 文档和代码学习时直接引用。
+
+`ur5_reach_env.py`
+- 定义 Gymnasium + MuJoCo 的 `UR5ReachEnv`。
+- 负责 reset、目标采样、动作到控制量的映射、奖励计算、碰撞判断和渲染。
+
+`train_ur5_reach.py`
+- 提供统一的训练与测试入口。
+- 支持 `td3`、`sac`、`ppo`。
+- 负责环境构建、模型初始化、回调注册、模型保存和评估流程。
+
+## Warp Pipeline
+
+`warp_ur5_config.py`
+- 定义 Warp 训练线使用的环境参数、训练参数和参数说明字典。
+
+`warp_ur5_env.py`
+- 定义 `UR5WarpReachEnv`。
+- 负责 Warp 环境中的 reset、目标采样、控制映射、奖励计算和接触判断。
+
+`warp_ur5_runtime.py`
+- 检查 `warp-lang`、`mujoco-warp` 和 `mujoco_playground` 是否可用。
+- 负责初始化 CUDA 设备并输出运行时信息。
+
+`train_ur5_reach_warp.py`
+- Warp 训练入口。
+- 支持 `sac` 与 `ppo`。
+
+`test_ur5_reach_warp.py`
+- Warp 推理与可视化入口。
+- 支持加载最终参数或中间 checkpoint。
+
+## Installation
+
+推荐 Python `3.10` 或 `3.11`。
 
 ```bash
-cd /home/zzyfan/mujoco_ur5_rl
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-如果要启用 `SBX` 实验线，建议直接执行：
+若在服务器或无显示环境上运行，可以先设置：
 
 ```bash
-bash scripts/install_sbx_env.sh
+export MUJOCO_GL=egl
 ```
 
-本地环境建议：
+若在本地图形桌面运行，通常不需要额外设置。
 
-- `classic/`、`warp_gpu/` 和模型测试可以继续使用你现有的训练环境
-- `SBX` 实验线建议直接在目标环境里执行 [install_sbx_env.sh](/home/zzyfan/mujoco_ur5_rl/scripts/install_sbx_env.sh)
-- 这个安装脚本会补齐 `sbx-rl`，并把 `jax` 与 CUDA plugin / PJRT 版本对齐
+## Warp Installation
 
-安装完成后，可用下面这条确认 JAX 已经识别 GPU：
+若需要纯 GPU Warp 训练线，请在安装主线依赖后继续执行：
 
 ```bash
-python - <<'PY'
-import jax
-print(jax.devices())
-PY
+pip install -r requirements-warp.txt
 ```
 
-服务器环境建议：
+Warp 训练线依赖：
+- `jax`
+- `brax`
+- `flax`
+- `orbax-checkpoint`
+- `mujoco-playground`
+- `warp-lang`
+- `mujoco-warp`
 
-- 项目目录：`/root/autodl-tmp/mujoco_rl_ur5`
-- conda 环境：`mujoco`
-- 每次服务器同步到新版后，建议执行：
+## Training
 
-```bash
-cd /root/autodl-tmp/mujoco_rl_ur5
-source /root/miniconda3/etc/profile.d/conda.sh
-conda activate mujoco
-bash scripts/install_sbx_env.sh
-```
-
-随机策略冒烟测试：
+### SAC
 
 ```bash
-python -m classic.test --random-policy --episodes 1 --max-steps 10 --no-render
-```
-
-开始训练：
-
-```bash
-python classic/train.py \
+python train_ur5_reach.py \
   --algo sac \
-  --robot ur5_cxy \
-  --run-name exp_sac \
-  --timesteps 500000 \
-  --device cuda \
-  --no-render
+  --run-name ur5_sac_main \
+  --total-timesteps 1500000
 ```
 
-测试训练结果：
+### TD3
 
 ```bash
-python classic/test.py \
-  --algo sac \
-  --robot ur5_cxy \
-  --run-name exp_sac \
-  --episodes 3 \
-  --render
+python train_ur5_reach.py \
+  --algo td3 \
+  --run-name ur5_td3_main \
+  --total-timesteps 1500000
 ```
 
-固定目标点慢速调试：
+### PPO
 
 ```bash
-python classic/test.py \
-  --algo sac \
-  --robot ur5_cxy \
-  --run-name exp_sac \
-  --episodes 1 \
-  --render \
-  --render-mode human \
-  --render-sleep 0.1 \
-  --fixed-target-x -0.78 \
-  --fixed-target-y 0.32 \
-  --fixed-target-z 0.18 \
-  --print-step-reward \
-  --print-reward-info
+python train_ur5_reach.py \
+  --algo ppo \
+  --run-name ur5_ppo_main \
+  --total-timesteps 1500000
 ```
 
-## 训练线说明
+## Warp Training
 
-### `classic/`
+### Warp SAC
 
-这条线是当前推荐的成功率主线。
+```bash
+python train_ur5_reach_warp.py \
+  --algo sac \
+  --run-name ur5_warp_sac \
+  --num-envs 256 \
+  --num-timesteps 5000000
+```
 
-- 环境：`classic/env.py`
-- 训练入口：`classic/train.py`
-- 测试入口：`classic/test.py`
-- 算法：`SAC / PPO / TD3`
-- 默认物理后端：`mujoco`
+### Warp PPO
 
-特点：
+```bash
+python train_ur5_reach_warp.py \
+  --algo ppo \
+  --run-name ur5_warp_ppo \
+  --num-envs 256 \
+  --num-timesteps 5000000
+```
 
-- 支持课程学习
-- 支持“固定目标 -> 小范围随机 -> 全范围随机”的自动课程学习
-- 支持 `goal-conditioned` 观测结构，可直接对接 `HER`
-- 支持 `dense / sparse` 两种奖励模式
-- 支持 `torque / joint_position_delta` 两种控制接口
-- 支持 `VecNormalize`
-- 支持 `best_model / final / interrupted`
-- 支持 `HER`（当前限定在 `SAC / TD3`）
-- 支持 `zero_robotiq` 机器人参数
-- 支持 `--legacy-zero-ee-velocity` 旧版速度读取开关
-- `ur5_cxy` 模型已将视觉 `mesh` 和代理碰撞体分离，减少复杂网格碰撞带来的训练噪声
-- 碰撞失败判定只统计机器人与外部危险几何的接触，不再把目标球、灯光或机器人内部自接触直接当作失败
-- `runaway` 现在只作为诊断指标保留，不再直接终止回合或施加大额失败罚分
+## Spectator Mode
 
-### `warp_gpu/`
-
-这条线提供纯 GPU 的 Warp 训练入口，也是当前的高吞吐验证线。
-
-- 环境：`warp_gpu/env.py`
-- 训练入口：`warp_gpu/train.py`
-- 测试入口：`warp_gpu/test.py`
-- 自检入口：`warp_gpu/smoke.py`
-- 运行时检测：`warp_gpu/runtime.py`
-- 算法：`PPO / SAC`
-- 物理后端：`warp`
-
-参数说明：
-
-- `--algo ppo`：调用 `brax.training.agents.ppo`
-- `--algo sac`：调用 `brax.training.agents.sac`
-- `TD3`：当前 Brax 官方安装包没有提供训练入口，因此 `warp_gpu/` 不支持
-- `--num-envs`：控制并行训练环境数量
-- `--num-eval-envs`：控制并行评估环境数量
-- `--target-sampling-mode`：控制目标采样模式，可选 `fixed / small_random / full_random`
-- `--target-range-scale`：控制 `small_random` 模式的采样范围
-- `--naconmax / --naccdmax / --njmax`：控制 Warp 接触缓存和约束缓存大小
-- 运行前提：需要 `warp-lang`、`mujoco-warp` 和可用 CUDA 设备
-- `warp_gpu/env.py` 与 `classic/env.py` 现在使用同一套危险碰撞过滤逻辑：忽略目标球、灯光和机器人内部自接触
-- `warp_gpu/` 当前支持“分阶段启动”的课程学习：先用固定目标训练，再切到小范围随机和全范围随机
-- `warp_gpu/` 现在也支持 `dense / sparse` 奖励切换；其中 `sparse` 更适合做 success/fail 主导的对照实验
-- 服务器脚本现在按职责拆成三条：
-  - [run_warp_validation_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_warp_validation_queue.sh)
-  - [run_classic_success_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_classic_success_queue.sh)
-  - [run_sbx_experiment.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_sbx_experiment.sh)
-- [run_total_queue.sh](/home/zzyfan/mujoco_ur5_rl/server_scripts/run_total_queue.sh) 现在只是总调度器，顺序是：
-  1. `warp` 验证线
-  2. `classic` 成功率线
+`--spectator-render` 用于在训练保持无头并行时，额外在主进程启动一个独立窗口进行旁观。
 
 示例：
 
 ```bash
-python -m warp_gpu.smoke --robot ur5_cxy --steps 2
-python -m warp_gpu.train --algo ppo --robot ur5_cxy --num-envs 256
-python -m warp_gpu.train --algo sac --robot ur5_cxy --num-envs 16 --num-eval-envs 16
-python -m warp_gpu.train --algo sac --robot ur5_cxy --reward-mode sparse --controller-mode joint_position_delta --target-sampling-mode fixed --num-envs 256
-python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --episodes 3
-python -m warp_gpu.test --algo sac --robot ur5_cxy --run-name ur5_warp_sac --episodes 1 --render --render-mode human
-```
-
-### `sbx_runner/`
-
-这条线是当前新增的 JAX 算法层实验线。
-
-- 环境：复用 `classic/env.py`
-- 训练入口：`sbx_runner/train.py`
-- 算法：`SAC / TD3 / TQC / PPO`
-- 依赖：`sbx-rl`
-
-定位：
-
-- 不替代 `classic/` 的 `HER` 主线
-- 不替代 `warp_gpu/` 的 GPU-native 高吞吐主线
-- 用来验证 “JAX 算法层 + 现有 MuJoCo/Gym 环境” 能否把方法论进一步收敛
-
-当前默认策略：
-
-- `goal-conditioned`
-- `sparse reward`
-- `joint_position_delta`
-- 暂不启用 `HER`
-
-示例：
-
-```bash
-python -m sbx_runner.train \
+python train_ur5_reach.py \
   --algo sac \
-  --robot ur5_cxy \
-  --run-name exp_sbx_sac \
-  --n-envs 128 \
-  --device cuda
+  --run-name ur5_sac_watch \
+  --n-envs 4 \
+  --spectator-render
 ```
 
-服务器端直接跑整轮训练：
+相关参数：
+- `--spectator-render-every 200`：控制旁观窗口的更新间隔。
+- `--no-spectator-deterministic`：旁观环境使用随机动作而不是确定性动作。
+
+与 `--render-training` 的区别：
+- `--render-training` 直接渲染训练环境本体，因此会退回单进程环境或 `DummyVecEnv`。
+- `--spectator-render` 保持训练环境无头并行，窗口来自主进程中的独立旁观环境。
+
+## Evaluation
+
+### 测试最佳模型
 
 ```bash
-cd /root/autodl-tmp/mujoco_rl_ur5
-bash server_scripts/start_total_queue_screen.sh
-```
-
-单独启动某一条线：
-
-```bash
-bash server_scripts/start_warp_validation_screen.sh
-bash server_scripts/start_classic_success_screen.sh
-bash server_scripts/start_sbx_experiment_screen.sh
-```
-
-attach 到训练会话：
-
-```bash
-screen -U -r total_queue
-screen -U -r warp_validation_queue
-screen -U -r classic_success_queue
-screen -U -r sbx_experiment
-```
-
-本地回拉当前新版整轮产物：
-
-```bash
-python scripts/auto_fetch_remote_models.py \
-  --host connect.bjb2.seetacloud.com \
-  --port 47627 \
-  --user root \
-  --password '你的密码' \
-  --remote-root /root/autodl-tmp/mujoco_rl_ur5 \
-  --local-root downloads/remote_models \
-  --preset gc_total_queue
-```
-
-默认会按远端目录镜像到本地，也就是产物会归位到：
-
-- `downloads/remote_models/models/...`
-- `downloads/remote_models/logs/.../best_model`
-
-当前还支持按职责选择回传预设：
-
-- `gc_total_queue`
-- `warp_validation_queue`
-- `classic_success_queue`
-- `sbx_experiment`
-
-如果你想兼容旧版“按预设名平铺目录”的方式，再额外加：
-
-```bash
---layout artifact
-```
-
-如果你希望“整轮训练全部完成后再统一回传”，保持默认即可：
-
-```bash
---download-mode all_at_end
-```
-
-如果你想谁先训完谁先下载，再改成：
-
-```bash
---download-mode incremental
-```
-
-## 训练日志
-
-`classic/` 和 `warp_gpu/` 现在都会在训练过程中打印阶段日志。
-
-- `classic/`：按时间步输出最近窗口内的 `recent_reward / recent_ep_len / recent_distance / success_rate / success_count / collision_rate / collision_count / runaway_rate / runaway_count / timeout_rate / timeout_count`，若开启评估还会附带 `eval_reward`
-- `classic/` 训练时若把 `n_envs / batch_size / gradient_steps` 设得过大，会自动收回到更适合 CPU MuJoCo 吞吐的区间；当前吞吐优先档默认会把 `frame_skip` 拉到 `2`
-- `warp_gpu/`：除了进度条，还会打印 Brax 回调返回的关键指标，例如 `eval_episode_reward / episode_sum_reward / distance / success / collision / runaway / timeout`
-- `warp_gpu/`：现在也会把 success/collision/runaway/timeout 同时打印成“比例 + 次数”，例如 `eval_success=12.50% eval_success_count=8/64`
-- `sbx_runner/`：沿用 `classic` 的最近窗口统计，会输出 `success_rate / success_count / collision_count / timeout_count / done_reasons`
-- `warp_gpu/` 现在建议优先组合：
-  - `--controller-mode joint_position_delta`
-  - `--reward-mode sparse`
-  - `--target-sampling-mode fixed`
-  先拿到第一次成功，再切到小范围随机和全范围随机
-- 训练结束时两条线都会额外打印最后一次可用回报
-- `collision_rate` 现在对应“过滤后的危险碰撞率”；若需要对照原始 MuJoCo 接触数，可查看 `info['raw_collision_contacts']`
-- `runaway_rate` 现在表示“回合内曾出现明显发散迹象的比例”，用于诊断而不是直接判失败
-- `classic/` 现在还会按最近回合输出 `done_reasons=...` 汇总，并补充 `success_count=3/20` 这类次数字段，方便直接判断最近窗口里到底成功了几次
-
-如果只想看新增日志，可以在服务器上配合：
-
-```bash
-tail -f classic_train.log
-tail -f warp_gpu_train.log
-```
-
-## 常用命令
-
-训练 zero 机械臂：
-
-```bash
-python classic/train.py \
+python train_ur5_reach.py \
   --algo sac \
-  --robot zero_robotiq \
-  --run-name exp_zero \
-  --timesteps 500000 \
-  --device cuda \
-  --no-render
+  --run-name ur5_sac_main \
+  --test \
+  --episodes 5 \
+  --render
 ```
 
-继续训练：
+### 打印奖励分解
 
 ```bash
-python classic/train.py \
-  --algo sac \
-  --robot ur5_cxy \
-  --run-name exp_sac \
-  --resume \
-  --timesteps 300000 \
-  --device cuda \
-  --skip-replay-buffer
+python train_ur5_reach.py \
+  --algo td3 \
+  --run-name ur5_td3_main \
+  --test \
+  --episodes 2 \
+  --print-reward-terms
 ```
 
-测试最佳模型：
+## Warp 测试命令
 
 ```bash
-python classic/test.py \
+python test_ur5_reach_warp.py \
   --algo sac \
-  --robot ur5_cxy \
-  --model-path logs/classic/sac/ur5_cxy/exp_sac/best_model/best_model.zip \
-  --norm-path logs/classic/sac/ur5_cxy/exp_sac/best_model/vec_normalize.pkl \
+  --run-name ur5_warp_sac \
   --episodes 3 \
   --render
 ```
 
-启用 goal-conditioned + HER 的 classic SAC：
+## Artifacts
 
-```bash
-python classic/train.py \
-  --algo sac \
-  --robot ur5_cxy \
-  --run-name exp_sac_her \
-  --goal-conditioned \
-  --use-her \
-  --reward-mode sparse \
-  --controller-mode joint_position_delta \
-  --timesteps 500000 \
-  --device cuda \
-  --no-render
-```
-
-启用旧版末端速度读取：
-
-```bash
-python classic/train.py \
-  --algo sac \
-  --robot zero_robotiq \
-  --run-name exp_zero_legacy \
-  --legacy-zero-ee-velocity \
-  --no-render
-```
-
-## 输出目录
-
-`classic/` 默认输出：
+所有训练产物都保存在仓库内相对路径，并按训练线、算法和实验名区分：
 
 ```text
-models/classic/{algo}/{robot}/{run_name}/
-  final/
-  interrupted/
-
-logs/classic/{algo}/{robot}/{run_name}/
+runs/main/{algo}/{run_name}/
+  run_config.json
+  tensorboard/
   best_model/
+    best_model.zip
+    vec_normalize.pkl
+  final/
+    final_model.zip
+    vec_normalize.pkl
+  interrupted/
+    interrupted_model.zip
+    vec_normalize.pkl
 ```
 
-说明：
-
-- `final/`：正常训练结束产物
-- `interrupted/`：`Ctrl+C` 中断保存
-- `best_model/`：评估回调保存
-- 旧版输出会在运行时自动同步到 `classic` 分层目录
-
-`warp_gpu/` 默认输出：
+Warp 训练线写入：
 
 ```text
-models/warp_gpu/{algo}/{robot}/{run_name}/
-  checkpoints/
+runs/warp/{algo}/{run_name}/
   config.json
+  checkpoints/
   final_policy.msgpack
 ```
 
-说明：
+## Algorithms
 
-- `checkpoints/`：Brax 训练过程中保存的阶段参数
-- `config.json`：训练参数、环境参数和 Warp 运行时信息
-- `final_policy.msgpack`：训练结束时导出的最终策略参数
-- `warp_gpu/` 当前只接入官方 Brax 自带的 `PPO / SAC`
-- `warp_gpu/test.py` 默认读取 `final_policy.msgpack`，也支持指定 `latest-checkpoint` 或某个 checkpoint 目录
-- `warp_gpu/test.py` 现在支持 `--render --render-mode human` 做窗口推理观察
+主线保留以下算法：
+- `td3`
+- `sac`
+- `ppo`
 
-## 推荐工作流
+Warp 训练线当前提供：
+- `sac`
+- `ppo`
 
-1. 先跑 `python -m classic.test --random-policy --episodes 1 --max-steps 10 --no-render`
-2. 再跑 `classic/train.py --no-render`
-3. 需要恢复时使用 `--resume`
-4. 需要启用旧版速度读取时再加 `--legacy-zero-ee-velocity`
-5. 验收时用 `classic/test.py` 可视化
+项目范围只保留 `UR5` 到点任务，不包含其他机器人任务分支。
 
-## 服务器更新代码
+## Documentation
 
-如果服务器本地没有手改文件，直接更新：
+Recommended reading order for the main pipeline:
 
-```bash
-cd /home/zzyfan/mujoco_ur5_rl
-git pull --rebase origin main
-```
+1. [ur5_reach_config.py](/home/zzyfan/mujoco_ur5_rl/ur5_reach_config.py)
+2. [ur5_reach_env.py](/home/zzyfan/mujoco_ur5_rl/ur5_reach_env.py)
+3. [train_ur5_reach.py](/home/zzyfan/mujoco_ur5_rl/train_ur5_reach.py)
+4. [docs/IMPLEMENTATION_GUIDE.md](/home/zzyfan/mujoco_ur5_rl/docs/IMPLEMENTATION_GUIDE.md)
+5. [docs/PARAMETER_REFERENCE.md](/home/zzyfan/mujoco_ur5_rl/docs/PARAMETER_REFERENCE.md)
+6. [docs/LIBRARY_USAGE.md](/home/zzyfan/mujoco_ur5_rl/docs/LIBRARY_USAGE.md)
+7. [docs/PORTABILITY.md](/home/zzyfan/mujoco_ur5_rl/docs/PORTABILITY.md)
+8. [notebooks/01_code_learning_walkthrough.ipynb](/home/zzyfan/mujoco_ur5_rl/notebooks/01_code_learning_walkthrough.ipynb)
+9. [notebooks/02_parameter_reference.ipynb](/home/zzyfan/mujoco_ur5_rl/notebooks/02_parameter_reference.ipynb)
+10. [notebooks/04_cli_parameter_guide.ipynb](/home/zzyfan/mujoco_ur5_rl/notebooks/04_cli_parameter_guide.ipynb)
+11. [notebooks/05_library_usage_guide.ipynb](/home/zzyfan/mujoco_ur5_rl/notebooks/05_library_usage_guide.ipynb)
 
-如果服务器本地已经有改动，先暂存再更新：
+Recommended reading order for the Warp pipeline:
 
-```bash
-cd /home/zzyfan/mujoco_ur5_rl
-git status
-git stash push -u -m "server-local-changes"
-git pull --rebase origin main
-git stash pop
-```
+1. [warp_ur5_config.py](/home/zzyfan/mujoco_ur5_rl/warp_ur5_config.py)
+2. [warp_ur5_runtime.py](/home/zzyfan/mujoco_ur5_rl/warp_ur5_runtime.py)
+3. [warp_ur5_env.py](/home/zzyfan/mujoco_ur5_rl/warp_ur5_env.py)
+4. [train_ur5_reach_warp.py](/home/zzyfan/mujoco_ur5_rl/train_ur5_reach_warp.py)
+5. [test_ur5_reach_warp.py](/home/zzyfan/mujoco_ur5_rl/test_ur5_reach_warp.py)
+6. [docs/WARP_IMPLEMENTATION_GUIDE.md](/home/zzyfan/mujoco_ur5_rl/docs/WARP_IMPLEMENTATION_GUIDE.md)
+7. [docs/WARP_PARAMETER_REFERENCE.md](/home/zzyfan/mujoco_ur5_rl/docs/WARP_PARAMETER_REFERENCE.md)
+8. [notebooks/03_warp_code_learning_walkthrough.ipynb](/home/zzyfan/mujoco_ur5_rl/notebooks/03_warp_code_learning_walkthrough.ipynb)
 
-更新后建议先做一次最小检查：
+## Notes
 
-```bash
-python -m py_compile classic/*.py warp_gpu/*.py
-python -m classic.test --random-policy --episodes 1 --max-steps 1 --no-render
-python -m warp_gpu.smoke --robot ur5_cxy --steps 1
-```
-
-## 代码结构
-
-更精简的结构说明见 [docs/STRUCTURE.md](docs/STRUCTURE.md)。
-
-项目交付笔记见 `PROJECT_STATUS.ipynb`，代码学习笔记见 `CODE_LEARNING_NOTES.ipynb`。
+- 默认控制模式是 `joint_delta`，这是为了让 UR5 线更稳定。
+- 如果你要对照更原始的力矩实验，可以切到 `--control-mode torque`。
+- 当前文档和代码注释优先服务于任务复现、参数理解和实现流程学习。
