@@ -70,7 +70,8 @@ assets/robotiq_cxy/meshes/
 
 `ur5_reach_env.py`
 - 定义 Gymnasium + MuJoCo 的 `UR5ReachEnv`。
-- 负责 reset、目标采样、动作到控制量的映射、奖励计算、碰撞判断和渲染。
+- 采用“末端跟踪”直观结构重写，观测为 24 维（相对位置/关节状态/上一步力矩/末端速度）。
+- 训练为力矩控制主线，不包含课程学习阶段切换逻辑。
 
 `train_ur5_reach.py`
 - 提供统一的训练与测试入口。
@@ -379,5 +380,5 @@ Recommended reading order for the Warp pipeline:
 
 - 默认任务逻辑对齐参考训练线的思路：随机目标、扭矩控制、24 维观测、阶段奖励和成功奖励。
 - 机械臂模型、MuJoCo 场景和目标工作空间仍然保持当前仓库自己的 UR5 配置，不直接照搬其他机械臂的结构和坐标范围。
-- 如果你要比较不同控制方式，可以切到 `--control-mode joint_delta`。
+- 主线重写版不再使用 `control_mode`/`joint_delta` 相关参数，当前固定为力矩控制。
 - 当前文档和代码注释优先服务于任务复现、参数理解和实现流程学习。

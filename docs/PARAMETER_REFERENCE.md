@@ -11,23 +11,23 @@
 | `model_xml` | MuJoCo XML 路径。当前固定指向 `assets/robotiq_cxy/lab_env.xml`，并通过仓库相对路径加载。 |
 | `frame_skip` | 一个 RL 动作会推进多少个物理步。 |
 | `episode_length` | 一个回合最长决策步数。 |
-| `render_camera_name` | 测试与学习笔记默认使用的相机名字。 |
+| `render_camera_name` | 主线重写版不使用该参数（仅保留兼容字段）。 |
 | `target_x_min/max` | 目标采样区域 x 范围。 |
 | `target_y_min/max` | 目标采样区域 y 范围。 |
 | `target_z_min/max` | 目标采样区域 z 范围。 |
-| `curriculum_fixed_episodes` | 固定目标点阶段持续多少回合。设为 `0` 时关闭该阶段，直接进入随机目标训练。 |
-| `curriculum_local_random_episodes` | 局部随机阶段持续多少回合。设为 `0` 时关闭该阶段，直接使用完整工作空间采样。 |
-| `curriculum_local_scale` | 局部随机阶段的采样半径比例。只有局部随机阶段启用时才会生效。 |
-| `fixed_target_x/y/z` | 固定阶段使用的目标点。 |
-| `control_mode` | 控制模式，`torque` 更接近参考训练线，`joint_delta` 提供更平滑的关节增量控制。 |
+| `curriculum_fixed_episodes` | 主线重写版不使用课程学习阶段（保留兼容字段）。 |
+| `curriculum_local_random_episodes` | 主线重写版不使用课程学习阶段（保留兼容字段）。 |
+| `curriculum_local_scale` | 主线重写版不使用课程学习阶段（保留兼容字段）。 |
+| `fixed_target_x/y/z` | 主线重写版不使用固定目标阶段（保留兼容字段）。 |
+| `control_mode` | 主线重写版固定为力矩控制，不再切换 `joint_delta`。 |
 | `torque_low/high` | 力矩裁剪边界。 |
-| `joint_delta_scale` | 关节增量控制每步最多改多少弧度。 |
-| `action_smoothing_alpha` | 动作平滑系数，控制抖动。 |
-| `position_kp/kd` | `joint_delta` 模式下的 PD 控制器参数。 |
+| `joint_delta_scale` | 主线重写版不使用关节增量控制（保留兼容字段）。 |
+| `action_smoothing_alpha` | 主线重写版不使用动作平滑（保留兼容字段）。 |
+| `position_kp/kd` | 主线重写版不使用 PD 关节增量控制（保留兼容字段）。 |
 | `gravity_compensation` | 给目标滑块和相关机构的补偿控制。 |
 | `fixed_gripper_ctrl` | 夹爪保持张开时的固定控制值。 |
 | `home_joint1/2/3` | 回合重置时前 3 个主关节的初始角度。 |
-| `success_threshold_stage1/2/3` | 不同课程阶段的成功判定距离。 |
+| `success_threshold_stage1/2/3` | 主线重写版使用固定 1cm 成功阈值（保留兼容字段）。 |
 | `step_penalty` | 每步都会扣的时间代价。 |
 | `distance_weight` | 基础距离惩罚的强度。 |
 | `progress_reward_gain` | 比上一时刻更接近目标时的奖励强度。 |
@@ -36,15 +36,15 @@
 | `phase_rewards` | 与 `phase_thresholds` 对应的一次性奖励值。 |
 | `speed_penalty_threshold/value` | 末端速度超过阈值时施加的固定惩罚。 |
 | `direction_reward_gain` | 速度方向朝向目标时的奖励强度。 |
-| `action_l2_penalty` | 抑制大动作。 |
-| `action_smoothness_penalty` | 抑制动作突变。 |
+| `action_l2_penalty` | 主线重写版不使用该惩罚项（保留兼容字段）。 |
+| `action_smoothness_penalty` | 主线重写版不使用该惩罚项（保留兼容字段）。 |
 | `joint_velocity_penalty` | 抑制关节速度在相邻时间步之间发生剧烈变化。 |
 | `collision_penalty` | 碰撞时的一次性大惩罚。 |
 | `success_bonus` | 成功时的一次性奖励。 |
 | `success_remaining_step_gain` | 成功后根据剩余步数附加的奖励系数。 |
 | `success_speed_bonus_very_slow/slow/medium` | 成功后按末端稳定程度附加的奖励。 |
-| `runaway_distance_threshold` | 跑飞判定阈值。 |
-| `runaway_penalty` | 跑飞时的一次性惩罚。 |
+| `runaway_distance_threshold` | 主线重写版不使用跑飞判定（保留兼容字段）。 |
+| `runaway_penalty` | 主线重写版不使用跑飞惩罚（保留兼容字段）。 |
 
 ## 训练参数
 
