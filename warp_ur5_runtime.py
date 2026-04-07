@@ -7,7 +7,7 @@
 #
 # 涉及的外部库：
 # - `warp-lang`：负责纯 GPU 后端初始化与设备管理。
-# - `mujoco-warp`：负责 MuJoCo 在 Warp 后端上的适配。
+# - `mujoco-mjx[warp]`：负责 MuJoCo 在 Warp 后端上的适配。
 # - `mujoco_playground`：负责 Warp / MJX 环境的训练封装。
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ except Exception:
     wp = None
 
 try:
-    import mujoco_warp as mjwarp
+    from mujoco import mjx
 except Exception:
-    mjwarp = None
+    mjx = None
 
 _WARP_INITIALIZED = False
 _CUDA_DEVICE = ""
@@ -30,7 +30,9 @@ _CUDA_DEVICE = ""
 
 def warp_available() -> bool:
     # 检查 Warp 核心依赖是否可导入。
-    return wp is not None and mjwarp is not None
+    # 新版 MuJoCo 通过 mujoco-mjx[warp] 提供 Warp 后端，
+    # 不再保证暴露单独的顶层 mujoco_warp 模块。
+    return wp is not None and mjx is not None
 
 
 def playground_importable() -> bool:
@@ -44,7 +46,7 @@ def ensure_warp_runtime() -> str:
     # 当前实现选择第一块可用 CUDA 设备，目的是让训练脚本在默认情况下行为稳定、可预测。
     global _WARP_INITIALIZED, _CUDA_DEVICE
     if not warp_available():
-        raise RuntimeError("MuJoCo Warp 不可用，请先安装 `warp-lang` 与 `mujoco-warp`。")
+        raise RuntimeError("MuJoCo Warp 不可用，请先安装 `warp-lang` 与 `mujoco-mjx[warp]`。")
     if _WARP_INITIALIZED:
         return _CUDA_DEVICE
     wp.init()

@@ -3,6 +3,7 @@ brax>=0.12.0
 flax>=0.8.0
 orbax-checkpoint>=0.6.0
 ml-collections>=0.1.1
-mujoco-playground
-warp-lang>=1.12.0
-mujoco-warp>=3.6.0
+mujoco>=3.6.0
+mujoco-mjx[warp]>=3.6.0
+playground
+tqdm

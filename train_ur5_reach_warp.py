@@ -200,8 +200,8 @@ def train(train_config: WarpTrainConfig, env_config: WarpUR5EnvConfig) -> int:
 
     # 这些依赖只在真正训练时导入，避免 `--help` 或静态阅读时就要求完整 Warp 环境。
     from brax.io import model as brax_model
-    from brax.training.agents.ppo import train as ppo_train
-    from brax.training.agents.sac import train as sac_train
+    from brax.training.agents.ppo.train import train as ppo_train
+    from brax.training.agents.sac.train import train as sac_train
     from mujoco_playground._src import wrapper
     from tqdm import tqdm
 
