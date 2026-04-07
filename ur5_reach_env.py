@@ -32,6 +32,14 @@ except Exception:
 
 from ur5_reach_config import UR5ReachEnvConfig, project_root
 
+OBSERVATION_SCHEMA = (
+    ("obs[00:03]", "relative_position_xyz", "目标位置减末端位置，单位米；依次对应 x/y/z 三个方向。"),
+    ("obs[03:09]", "joint_positions", "UR5 六个关节当前角度，单位弧度；顺序是 joint1 到 joint6。"),
+    ("obs[09:15]", "joint_velocities", "UR5 六个关节当前角速度，单位弧度每秒；顺序是 joint1 到 joint6。"),
+    ("obs[15:21]", "previous_torque", "上一决策步实际施加到六个关节的力矩，单位牛米；顺序是 joint1 到 joint6。"),
+    ("obs[21:24]", "ee_velocity_xyz", "末端执行器当前线速度，单位米每秒；依次对应 x/y/z 三个方向。"),
+)
+
 
 class UR5ReachEnv(gym.Env):
     # UR5 到点任务环境。
@@ -149,6 +157,15 @@ class UR5ReachEnv(gym.Env):
         self.best_distance: float | None = None
         self.phase_rewards_given: set[float] = set()
         self.last_reward_terms: dict[str, float] = {}
+        self.episode_return = 0.0
+        self.episode_collision_count = 0
+        self.episode_success_count = 0
+        self.lifetime_success_count = 0
+
+    @classmethod
+    def observation_schema(cls) -> tuple[tuple[str, str, str], ...]:
+        # 返回观测向量的切片定义，便于训练脚本把每一段的物理含义直接打印出来。
+        return OBSERVATION_SCHEMA
 
     def _collect_descendant_body_ids(self, root_body_id: int) -> set[int]:
         # 收集机器人根节点下的所有 body id，用来过滤机器人内部自碰撞。
@@ -507,16 +524,28 @@ class UR5ReachEnv(gym.Env):
         self.phase_rewards_given = set()
         self.step_count = 0
         self.last_reward_terms = {}
+        self.episode_return = 0.0
+        self.episode_collision_count = 0
+        self.episode_success_count = 0
+        current_episode_index = self.episode_index + 1
 
         # 第四步：生成首个观测，并把调试信息放进 info。
         observation = self._compose_observation()
         info = {
+            "episode_index": current_episode_index,
             "target_position": self.target_position.copy(),
             "curriculum_stage": self.current_stage,
             "success_threshold": self._success_threshold(),
             "distance": float(self.previous_distance),
+            "relative_distance": float(self.previous_distance),
+            "ee_speed": 0.0,
+            "relative_speed": 0.0,
+            "episode_return": 0.0,
+            "episode_collision_count": 0,
+            "episode_success_count": 0,
+            "lifetime_success_count": int(self.lifetime_success_count),
         }
-        self.episode_index += 1
+        self.episode_index = current_episode_index
         return observation, info
 
     def step(self, action: np.ndarray):
@@ -554,18 +583,50 @@ class UR5ReachEnv(gym.Env):
             ee_speed,
             remaining_steps,
         )
+        self.episode_return += float(reward)
+        if collision:
+            self.episode_collision_count += 1
+        if done_reason == "success":
+            self.episode_success_count += 1
+            self.lifetime_success_count += 1
         # 第五步：更新历史动作，构造下一步需要的观测和 info。
         self.previous_action = np.clip(normalized_action, -1.0, 1.0).astype(np.float32)
         observation = self._compose_observation()
+        episode_summary = None
+        if terminated or truncated:
+            episode_summary = {
+                "episode_index": int(self.episode_index),
+                "episode_steps": int(self.step_count),
+                "episode_return": float(self.episode_return),
+                "episode_collision_count": int(self.episode_collision_count),
+                "episode_success_count": int(self.episode_success_count),
+                "lifetime_success_count": int(self.lifetime_success_count),
+                "final_distance": float(distance),
+                "min_distance": float(self.best_distance if self.best_distance is not None else distance),
+                "final_speed": float(ee_speed),
+                "curriculum_stage": self.current_stage,
+                "done_reason": done_reason,
+                "reward_terms": dict(reward_terms),
+            }
         info = {
+            "episode_index": int(self.episode_index),
+            "step_in_episode": int(self.step_count),
             "distance": distance,
+            "relative_distance": distance,
+            "ee_speed": ee_speed,
+            "relative_speed": ee_speed,
             "success": done_reason == "success",
             "collision": collision,
             "runaway": done_reason == "runaway",
             "done_reason": done_reason,
             "curriculum_stage": self.current_stage,
             "success_threshold": self._success_threshold(),
+            "episode_return": float(self.episode_return),
+            "episode_collision_count": int(self.episode_collision_count),
+            "episode_success_count": int(self.episode_success_count),
+            "lifetime_success_count": int(self.lifetime_success_count),
             "reward_terms": reward_terms,
+            "episode_summary": episode_summary,
         }
         return observation, reward, terminated, truncated, info
 

@@ -215,6 +215,108 @@ class SpectatorRenderCallback(BaseCallback):
             self.spectator_obs = None
 
 
+def _safe_float(value) -> float | None:
+    # 尽量把 NumPy 标量、普通数字或布尔值转成 Python `float`，失败时返回 `None`。
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value) -> int | None:
+    # 和 `_safe_float(...)` 类似，但这里希望得到整数日志字段。
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+class DetailedTrainLogCallback(BaseCallback):
+    # 训练过程诊断日志：
+    # 1. 开始训练时打印观测向量每一段的真实含义。
+    # 2. 每个向量化 step 输出一行聚合诊断。
+    # 3. 每个回合结束时输出完整摘要。
+
+    def __init__(self, verbose: int = 0) -> None:
+        super().__init__(verbose=verbose)
+
+    def _on_training_start(self) -> None:
+        print("observation_schema:")
+        for obs_slice, name, meaning in UR5ReachEnv.observation_schema():
+            print(f"  {obs_slice} {name}: {meaning}")
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", [])
+        rewards = np.asarray(self.locals.get("rewards", []), dtype=np.float32).reshape(-1)
+        dones = np.asarray(self.locals.get("dones", []), dtype=bool).reshape(-1)
+        if not infos:
+            return True
+
+        distances: list[float] = []
+        speeds: list[float] = []
+        episode_returns: list[float] = []
+        active_collision_counts: list[int] = []
+        lifetime_success_total = 0
+        stage_counts: dict[str, int] = {}
+        representative_info = None
+
+        for info in infos:
+            if not isinstance(info, dict):
+                continue
+            distance = _safe_float(info.get("relative_distance", info.get("distance")))
+            speed = _safe_float(info.get("relative_speed", info.get("ee_speed")))
+            episode_return = _safe_float(info.get("episode_return"))
+            collision_count = _safe_int(info.get("episode_collision_count"))
+            success_total = _safe_int(info.get("lifetime_success_count"))
+            stage = info.get("curriculum_stage")
+            if distance is not None:
+                distances.append(distance)
+            if speed is not None:
+                speeds.append(speed)
+            if episode_return is not None:
+                episode_returns.append(episode_return)
+            if collision_count is not None:
+                active_collision_counts.append(collision_count)
+            if success_total is not None:
+                lifetime_success_total += success_total
+            if isinstance(stage, str):
+                stage_counts[stage] = stage_counts.get(stage, 0) + 1
+            if representative_info is None:
+                representative_info = info
+
+        reward_mean = float(np.mean(rewards)) if rewards.size else 0.0
+        mean_distance = float(np.mean(distances)) if distances else 0.0
+        mean_speed = float(np.mean(speeds)) if speeds else 0.0
+        mean_episode_return = float(np.mean(episode_returns)) if episode_returns else 0.0
+        active_collisions = int(np.sum(active_collision_counts)) if active_collision_counts else 0
+        representative_step = _safe_int((representative_info or {}).get("step_in_episode")) or 0
+        representative_episode = _safe_int((representative_info or {}).get("episode_index")) or 0
+        stage_summary = ",".join(f"{name}:{count}" for name, count in sorted(stage_counts.items())) if stage_counts else "unknown"
+        print(
+            f"[train_step] env_steps={self.num_timesteps} episode={representative_episode} "
+            f"step={representative_step} rel_dist_mean={mean_distance:.4f} rel_speed_mean={mean_speed:.4f} "
+            f"success_total={lifetime_success_total} episode_return_mean={mean_episode_return:.3f} "
+            f"collision_count_active={active_collisions} reward_mean={reward_mean:.3f} stage_mix={stage_summary}"
+        )
+
+        for idx, done in enumerate(dones):
+            if not bool(done) or idx >= len(infos) or not isinstance(infos[idx], dict):
+                continue
+            summary = infos[idx].get("episode_summary") or {}
+            print(
+                f"[episode_end] env={idx} episode={_safe_int(summary.get('episode_index')) or 0} "
+                f"done_reason={summary.get('done_reason', 'unknown')} total_reward={_safe_float(summary.get('episode_return')) or 0.0:.3f} "
+                f"steps={_safe_int(summary.get('episode_steps')) or 0} final_distance={_safe_float(summary.get('final_distance')) or 0.0:.4f} "
+                f"min_distance={_safe_float(summary.get('min_distance')) or 0.0:.4f} "
+                f"final_speed={_safe_float(summary.get('final_speed')) or 0.0:.4f} "
+                f"collisions={_safe_int(summary.get('episode_collision_count')) or 0} "
+                f"episode_successes={_safe_int(summary.get('episode_success_count')) or 0} "
+                f"lifetime_successes={_safe_int(summary.get('lifetime_success_count')) or 0} "
+                f"stage={summary.get('curriculum_stage', 'unknown')}"
+            )
+        return True
+
+
 def build_parser() -> argparse.ArgumentParser:
     # 构造主线 CLI。
     #
@@ -558,6 +660,7 @@ def train(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> None:
     callbacks.append(eval_callback)
     callbacks.append(SaveVecNormalizeCallback(eval_callback, paths.best_normalize_path, verbose=1))
     callbacks.append(ManualInterruptCallback(paths.interrupted_model_path, paths.interrupted_normalize_path, verbose=1))
+    callbacks.append(DetailedTrainLogCallback(verbose=1))
     # 最后再按模式决定是否追加训练渲染或旁观渲染回调。
     if train_config.render_training:
         callbacks.append(TrainRenderCallback(train_config.render_every, verbose=1))
