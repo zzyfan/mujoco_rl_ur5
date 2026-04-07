@@ -17,6 +17,7 @@ env/
 # Training artifacts (very large)
 runs/
 tensorboard/
+logs/
 .ipynb_checkpoints/
 
 # System files
