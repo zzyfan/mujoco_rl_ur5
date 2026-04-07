@@ -105,10 +105,9 @@ class TrainRenderCallback(BaseCallback):
         return True
 
 
-def make_training_envs(n_envs: int, render: bool) -> VecNormalize:
-    # 创建训练环境。开启渲染时所有环境声明同一 render_mode，
-    # 但训练过程中仅主动渲染第一个环境，避免弹出多个窗口。
-    render_mode = "human" if render else None
+def make_training_envs(n_envs: int, render_mode: str | None) -> VecNormalize:
+    # 创建训练环境。render_mode 使用 Gymnasium 官方命名（None / "human"）。
+    # 训练过程中仅主动渲染第一个环境，避免弹出多个窗口。
 
     def _make_env(render_mode=render_mode):
         return UR5ReachEnv(render_mode=render_mode)
@@ -136,15 +135,22 @@ def train_robot_arm(
     algo: str,
     total_timesteps: int,
     n_envs: int,
-    render: bool,
+    render_mode: str | None,
     render_every: int,
     device: str,
 ) -> None:
     print("创建机械臂环境...")  # 训练入口日志
+<<<<<<< HEAD
     if render and n_envs > 1:
         print("已开启并行训练渲染：仅显示第 1 个环境，其余环境保持无头模式")
 
     env = make_training_envs(n_envs=n_envs, render=render)  # 构造训练 VecEnv
+=======
+    if render_mode == "human" and n_envs > 1:
+        print("已开启并行训练渲染：仅显示第 1 个环境，其余环境保持无头模式")
+
+    env = make_training_envs(n_envs=n_envs, render_mode=render_mode)  # 构造训练 VecEnv
+>>>>>>> fa46e0e (Add learning notebooks and expand inline comments)
 
     # 设置动作噪声
     # - TD3 使用 action noise 来提升探索
@@ -211,7 +217,11 @@ def train_robot_arm(
     manual_interrupt_callback = ManualInterruptCallback(algo=algo, verbose=1)
 
     callbacks = [eval_callback, save_vec_normalize_callback, manual_interrupt_callback]  # 训练回调集合
+<<<<<<< HEAD
     if render:
+=======
+    if render_mode == "human":
+>>>>>>> fa46e0e (Add learning notebooks and expand inline comments)
         callbacks.append(TrainRenderCallback(render_every=render_every, render_index=0, verbose=1))
 
     os.makedirs("./logs", exist_ok=True)  # 训练日志目录
@@ -219,7 +229,9 @@ def train_robot_arm(
 
     print("开始训练...")  # 真正进入 learn 阶段
     print("提示: 按 Ctrl+C 可以中途停止训练并保存最后一次模型数据")
-    print(f"训练配置: algo={algo}, total_timesteps={total_timesteps}, n_envs={n_envs}, render={render}, render_every={render_every}")
+    print(
+        f"训练配置: algo={algo}, total_timesteps={total_timesteps}, n_envs={n_envs}, render_mode={render_mode}, render_every={render_every}"
+    )
     start_time = time.time()
 
     model.learn(
@@ -284,7 +296,16 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=10, help="测试回合数")  # 测试回合数
     parser.add_argument("--total-timesteps", type=int, default=5_000_000, help="训练步数")  # 训练总步数
     parser.add_argument("--n-envs", type=int, default=1, help="并行环境数")  # 并行环境数
+<<<<<<< HEAD
     parser.add_argument("--render", action="store_true", help="训练时打开人类可视化窗口")  # 训练渲染开关
+=======
+    parser.add_argument(
+        "--render-mode",
+        choices=["none", "human"],
+        default="none",
+        help="训练渲染模式（符合 Gymnasium 官方命名）",
+    )  # 训练渲染模式
+>>>>>>> fa46e0e (Add learning notebooks and expand inline comments)
     parser.add_argument("--render-every", type=int, default=1, help="训练渲染刷新间隔")  # 训练渲染频率
     parser.add_argument("--device", type=str, default="auto", help="训练设备，例如 auto/cpu/cuda")  # 训练设备
 
@@ -301,7 +322,7 @@ def main() -> None:
             algo=args.algo,
             total_timesteps=args.total_timesteps,
             n_envs=args.n_envs,
-            render=args.render,
+            render_mode=None if args.render_mode == "none" else args.render_mode,
             render_every=args.render_every,
             device=args.device,
         )
