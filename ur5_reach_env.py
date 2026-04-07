@@ -40,7 +40,7 @@ class UR5ReachEnv(gym.Env):
     # 1. 目标相对末端位置：3
     # 2. 六个机械臂关节角：6
     # 3. 六个机械臂关节速度：6
-    # 4. 上一步归一化动作：6
+    # 4. 上一步实际施加的关节力矩：6
     # 5. 末端线速度：3
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
@@ -142,10 +142,12 @@ class UR5ReachEnv(gym.Env):
         self.target_position = np.zeros(3, dtype=np.float32)
         self.previous_action = np.zeros(6, dtype=np.float32)
         self.previous_control = np.zeros(6, dtype=np.float32)
+        self.previous_joint_velocities = np.zeros(6, dtype=np.float32)
         self.previous_ee_position = np.zeros(3, dtype=np.float32)
         self.current_ee_velocity = np.zeros(3, dtype=np.float32)
         self.previous_distance: float | None = None
         self.best_distance: float | None = None
+        self.phase_rewards_given: set[float] = set()
         self.last_reward_terms: dict[str, float] = {}
 
     def _collect_descendant_body_ids(self, root_body_id: int) -> set[int]:
@@ -284,13 +286,14 @@ class UR5ReachEnv(gym.Env):
         relative_position = self.target_position - ee_position
         joint_positions = self.data.qpos[self.arm_qpos_adr].astype(np.float32).copy()
         joint_velocities = self.data.qvel[self.arm_qvel_adr].astype(np.float32).copy()
+        previous_torque = self.previous_control.astype(np.float32)
         # 再按固定顺序拼成一个一维向量，供策略网络直接读取。
         observation = np.concatenate(
             [
                 relative_position.astype(np.float32),
                 joint_positions,
                 joint_velocities,
-                self.previous_action.astype(np.float32),
+                previous_torque,
                 self.current_ee_velocity.astype(np.float32),
             ]
         )
@@ -373,6 +376,8 @@ class UR5ReachEnv(gym.Env):
         previous_action: np.ndarray,
         distance: float,
         collision: bool,
+        ee_speed: float,
+        remaining_steps: int,
     ) -> tuple[float, bool, bool, dict[str, float], str]:
         # 计算 reward，并把各个奖励项拆开返回。
         #
@@ -384,54 +389,76 @@ class UR5ReachEnv(gym.Env):
         truncated = False
         done_reason = "running"
 
-        # 先算和上一时刻相比是否更接近目标，并更新历史最优距离。
-        progress = 0.0 if self.previous_distance is None else float(self.previous_distance - distance)
-        self.previous_distance = float(distance)
+        # 先算和上一时刻相比是否更接近目标，并保留“历史最优距离”和“上一时刻距离”两种基准。
+        previous_distance = float(self.previous_distance) if self.previous_distance is not None else float(distance)
         if self.best_distance is None:
             self.best_distance = float(distance)
-        else:
-            self.best_distance = min(float(self.best_distance), float(distance))
+        best_distance_before = float(self.best_distance)
 
         # 奖励拆分成若干明确的物理含义项，便于调参和解释。
         reward_terms = {
             "step_penalty": -float(self.config.step_penalty),
             "distance_penalty": -float(self.config.distance_weight) * float(np.sqrt(distance + 1e-8)),
-            "progress_reward": float(self.config.progress_reward_gain) * max(progress, 0.0),
-            "regress_penalty": -float(self.config.regress_penalty_gain) * max(-progress, 0.0),
+            "progress_reward": 0.0,
+            "regress_penalty": 0.0,
+            "phase_reward": 0.0,
+            "speed_penalty": 0.0,
             "direction_reward": 0.0,
             "action_penalty": -float(self.config.action_l2_penalty) * float(np.mean(np.square(action))),
             "smoothness_penalty": -float(self.config.action_smoothness_penalty) * float(np.mean(np.square(action - previous_action))),
-            "joint_velocity_penalty": -float(self.config.joint_velocity_penalty) * float(
-                np.mean(np.abs(self.data.qvel[self.arm_qvel_adr]))
-            ),
+            "joint_velocity_penalty": 0.0,
             "collision_penalty": 0.0,
             "success_bonus": 0.0,
             "runaway_penalty": 0.0,
         }
 
+        # 奖励主体和 zero-arm 一样，优先看是否刷新历史最优距离，其次再看是否比上一时刻更远。
+        if distance < best_distance_before:
+            reward_terms["progress_reward"] = float(self.config.progress_reward_gain) * (best_distance_before - float(distance))
+            self.best_distance = float(distance)
+        elif distance > previous_distance:
+            reward_terms["regress_penalty"] = -float(self.config.regress_penalty_gain) * (float(distance) - previous_distance)
+
+        # 阶段奖励只在第一次穿过阈值时触发一次，鼓励先学会逐步逼近目标。
+        for threshold, phase_reward in zip(self.config.phase_thresholds, self.config.phase_rewards):
+            if distance < float(threshold) and float(threshold) not in self.phase_rewards_given:
+                reward_terms["phase_reward"] += float(phase_reward)
+                self.phase_rewards_given.add(float(threshold))
+
+        # 速度太快时给予固定惩罚，抑制冲向目标时的剧烈摆动。
+        if ee_speed > float(self.config.speed_penalty_threshold):
+            reward_terms["speed_penalty"] = -float(self.config.speed_penalty_value)
+
         # 方向奖励需要当前末端速度和“朝向目标的方向”同时存在。
-        ee_speed = float(np.linalg.norm(self.current_ee_velocity))
         to_target = self.target_position - self._finger_center()
         to_target_norm = float(np.linalg.norm(to_target))
         if ee_speed > 1e-6 and to_target_norm > 1e-6:
             movement_direction = self.current_ee_velocity / (ee_speed + 1e-6)
             target_direction = to_target / (to_target_norm + 1e-6)
-            reward_terms["direction_reward"] = float(self.config.direction_reward_gain) * max(
-                float(np.dot(movement_direction, target_direction)),
-                0.0,
-            )
+            direction_cos = max(float(np.dot(movement_direction, target_direction)), 0.0)
+            reward_terms["direction_reward"] = float(self.config.direction_reward_gain) * (direction_cos**2)
+
+        # 关节速度变化惩罚使用“当前关节速度 - 上一时刻关节速度”的绝对值和。
+        joint_velocity_change = np.abs(self.data.qvel[self.arm_qvel_adr] - self.previous_joint_velocities)
+        reward_terms["joint_velocity_penalty"] = -float(self.config.joint_velocity_penalty) * float(np.sum(joint_velocity_change))
 
         # 碰撞、成功、跑飞和超时共同决定回合是否结束。
         if collision:
             reward_terms["collision_penalty"] = -float(self.config.collision_penalty)
+            reward_terms["collision_penalty"] += -float(self.config.step_penalty) * float(max(remaining_steps, 0))
             terminated = True
             done_reason = "collision"
 
         success = distance <= self._success_threshold()
         if success:
             reward_terms["success_bonus"] = float(self.config.success_bonus)
-            if ee_speed < 0.08:
-                reward_terms["success_bonus"] += float(self.config.success_speed_bonus)
+            reward_terms["success_bonus"] += float(self.config.success_remaining_step_gain) * float(max(remaining_steps, 0))
+            if ee_speed < 0.01:
+                reward_terms["success_bonus"] += float(self.config.success_speed_bonus_very_slow)
+            elif ee_speed < 0.05:
+                reward_terms["success_bonus"] += float(self.config.success_speed_bonus_slow)
+            elif ee_speed < 0.10:
+                reward_terms["success_bonus"] += float(self.config.success_speed_bonus_medium)
             terminated = True
             done_reason = "success"
 
@@ -444,6 +471,7 @@ class UR5ReachEnv(gym.Env):
             truncated = True
             done_reason = "timeout"
 
+        self.previous_distance = float(distance)
         reward = float(sum(reward_terms.values()))
         self.last_reward_terms = reward_terms
         return reward, terminated, truncated, reward_terms, done_reason
@@ -471,10 +499,12 @@ class UR5ReachEnv(gym.Env):
         ee_position = self._finger_center()
         self.previous_action[:] = 0.0
         self.previous_control[:] = 0.0
+        self.previous_joint_velocities[:] = 0.0
         self.previous_ee_position = ee_position.astype(np.float32)
         self.current_ee_velocity[:] = 0.0
         self.previous_distance = float(np.linalg.norm(self.target_position - ee_position))
         self.best_distance = self.previous_distance
+        self.phase_rewards_given = set()
         self.step_count = 0
         self.last_reward_terms = {}
 
@@ -497,6 +527,7 @@ class UR5ReachEnv(gym.Env):
         # 第一步：把外部传入动作转成 NumPy 数组，并保留上一时刻动作给 smoothness reward 用。
         normalized_action = np.asarray(action, dtype=np.float32)
         previous_action = self.previous_action.copy()
+        self.previous_joint_velocities = self.data.qvel[self.arm_qvel_adr].astype(np.float32).copy()
         # 第二步：把策略动作映射成真实控制量，并写入 MuJoCo 执行器。
         control = self._action_to_control(normalized_action)
         self.data.ctrl[self.arm_actuator_ids] = control
@@ -512,12 +543,16 @@ class UR5ReachEnv(gym.Env):
         ee_position = self._finger_center()
         self._update_ee_velocity(ee_position)
         distance = float(np.linalg.norm(self.target_position - ee_position))
+        ee_speed = float(np.linalg.norm(self.current_ee_velocity))
         collision = self._has_external_collision()
+        remaining_steps = int(self.config.episode_length) - self.step_count
         reward, terminated, truncated, reward_terms, done_reason = self._compute_reward(
             normalized_action,
             previous_action,
             distance,
             collision,
+            ee_speed,
+            remaining_steps,
         )
         # 第五步：更新历史动作，构造下一步需要的观测和 info。
         self.previous_action = np.clip(normalized_action, -1.0, 1.0).astype(np.float32)

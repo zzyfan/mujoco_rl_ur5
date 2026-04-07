@@ -26,7 +26,7 @@ WARP_ENV_PARAMETER_DOCS: dict[str, str] = {
     "naconmax": "Warp 接触缓存大小。",
     "naccdmax": "Warp CCD 接触缓存大小。",
     "njmax": "Warp 约束缓存大小。",
-    "target_sampling_mode": "目标采样模式，支持 `full_random`、`small_random`、`fixed`。",
+    "target_sampling_mode": "目标采样模式，支持 `full_random`、`small_random`、`fixed`。默认使用更接近 zero-arm 的 `full_random`。",
     "target_range_scale": "小范围随机目标采样时的空间缩放比例。",
     "fixed_target_x": "固定目标点 x 坐标。",
     "fixed_target_y": "固定目标点 y 坐标。",
@@ -34,14 +34,14 @@ WARP_ENV_PARAMETER_DOCS: dict[str, str] = {
     "success_threshold": "全随机阶段成功阈值。",
     "stage1_success_threshold": "固定目标阶段成功阈值。",
     "stage2_success_threshold": "小范围随机阶段成功阈值。",
-    "controller_mode": "控制模式，支持 `torque` 和 `joint_position_delta`。",
+    "controller_mode": "控制模式，支持 `torque` 和 `joint_position_delta`。当前默认使用更接近参考训练线的 `torque`。",
     "action_target_scale": "力矩模式下，策略输出映射成真实扭矩时的缩放比例。",
-    "action_smoothing_alpha": "动作平滑系数。",
+    "action_smoothing_alpha": "动作平滑系数。设为 0 表示不做平滑。",
     "joint_position_delta_scale": "位置增量控制时，每步允许的目标关节增量。",
     "position_control_kp": "位置控制比例增益。",
     "position_control_kd": "位置控制阻尼增益。",
     "goal_observation": "是否显式把 achieved/desired goal 拼到观测后面。",
-    "reward_mode": "奖励模式，支持 `dense` 和 `sparse`。",
+    "reward_mode": "奖励模式，支持 `dense` 和 `sparse`。当前默认使用 zero 风格的 `dense`。",
 }
 
 
@@ -107,17 +107,17 @@ class WarpUR5EnvConfig:
     fixed_target_z: float | None = None
 
     # 不同采样模式对应不同成功阈值。
-    success_threshold: float = 0.012
-    stage1_success_threshold: float = 0.030
-    stage2_success_threshold: float = 0.020
+    success_threshold: float = 0.010
+    stage1_success_threshold: float = 0.010
+    stage2_success_threshold: float = 0.010
 
     # 控制方式。`joint_position_delta` 会走 PD 控制器，`torque` 直接输出扭矩。
     # 这组参数最终会影响 `_scale_policy_action()` 和 `_compute_position_delta_torque()`。
-    torque_low: float = -10.0
-    torque_high: float = 10.0
-    action_target_scale: float = 0.6
-    action_smoothing_alpha: float = 0.70
-    controller_mode: str = "joint_position_delta"
+    torque_low: float = -15.0
+    torque_high: float = 15.0
+    action_target_scale: float = 1.0
+    action_smoothing_alpha: float = 0.0
+    controller_mode: str = "torque"
     joint_position_delta_scale: float = 0.06
     position_control_kp: float = 55.0
     position_control_kd: float = 4.0
@@ -136,31 +136,31 @@ class WarpUR5EnvConfig:
 
     # dense reward 的组成项和诊断阈值。`step()` 会逐项把这些系数拼进 reward。
     # phase_thresholds / phase_rewards 组合用于“第一次穿过某个距离阈值时发奖励”的机制。
-    step_penalty: float = 0.02
-    base_distance_weight: float = 0.90
-    improvement_gain: float = 130.0
-    regress_gain: float = 75.0
-    speed_penalty_threshold: float = 0.28
-    speed_penalty_value: float = 0.7
-    direction_reward_gain: float = 3.0
-    joint_vel_change_penalty_gain: float = 0.08
-    action_magnitude_penalty_gain: float = 0.01
-    action_change_penalty_gain: float = 0.007
+    step_penalty: float = 0.10
+    base_distance_weight: float = 0.80
+    improvement_gain: float = 1.0
+    regress_gain: float = 0.8
+    speed_penalty_threshold: float = 0.5
+    speed_penalty_value: float = 0.2
+    direction_reward_gain: float = 1.0
+    joint_vel_change_penalty_gain: float = 0.03
+    action_magnitude_penalty_gain: float = 0.0
+    action_change_penalty_gain: float = 0.0
     idle_distance_threshold: float = 0.08
     idle_speed_threshold: float = 0.015
-    idle_penalty_value: float = 0.12
-    phase_thresholds: tuple[float, ...] = (1.6, 1.3, 1.0, 0.8, 0.6, 0.5, 0.3, 0.1, 0.05, 0.02, 0.012, 0.006)
-    phase_rewards: tuple[float, ...] = (20.0, 35.0, 50.0, 70.0, 90.0, 100.0, 200.0, 300.0, 500.0, 800.0, 1200.0, 1600.0)
-    success_bonus: float = 3000.0
+    idle_penalty_value: float = 0.0
+    phase_thresholds: tuple[float, ...] = (0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002)
+    phase_rewards: tuple[float, ...] = (100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0)
+    success_bonus: float = 10000.0
     success_remaining_step_gain: float = 4.0
-    success_speed_bonus_very_slow: float = 600.0
-    success_speed_bonus_slow: float = 300.0
-    success_speed_bonus_medium: float = 150.0
-    collision_penalty_value: float = 250.0
-    runaway_distance_threshold: float = 1.4
-    runaway_ee_speed_threshold: float = 4.0
-    runaway_joint_velocity_threshold: float = 12.0
-    runaway_penalty_value: float = 120.0
+    success_speed_bonus_very_slow: float = 2000.0
+    success_speed_bonus_slow: float = 1000.0
+    success_speed_bonus_medium: float = 500.0
+    collision_penalty_value: float = 5000.0
+    runaway_distance_threshold: float = 10.0
+    runaway_ee_speed_threshold: float = 50.0
+    runaway_joint_velocity_threshold: float = 100.0
+    runaway_penalty_value: float = 0.0
 
 
 @dataclass
@@ -174,7 +174,7 @@ class WarpTrainConfig:
     # 实验标识和总体训练规模。
     # `num_envs` 和 `num_eval_envs` 是 Warp 线吞吐与评估成本的核心开关。
     algo: str = "sac"
-    run_name: str = "ur5_warp_gpu"
+    run_name: str = "ur5_warp_zero_aligned"
     seed: int = 42
     num_timesteps: int = 5_000_000
     num_envs: int = 256

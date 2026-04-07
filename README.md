@@ -305,6 +305,7 @@ Recommended reading order for the Warp pipeline:
 
 ## Notes
 
-- 默认控制模式是 `joint_delta`，这是为了让 UR5 线更稳定。
-- 如果你要对照更原始的力矩实验，可以切到 `--control-mode torque`。
+- 默认任务逻辑对齐参考训练线的思路：随机目标、扭矩控制、24 维观测、阶段奖励和成功奖励。
+- 机械臂模型、MuJoCo 场景和目标工作空间仍然保持当前仓库自己的 UR5 配置，不直接照搬其他机械臂的结构和坐标范围。
+- 如果你要比较不同控制方式，可以切到 `--control-mode joint_delta`。
 - 当前文档和代码注释优先服务于任务复现、参数理解和实现流程学习。

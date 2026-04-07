@@ -33,17 +33,17 @@ ENV_PARAMETER_DOCS: dict[str, str] = {
     "target_y_max": "目标采样区域 y 最大值，单位米。",
     "target_z_min": "目标采样区域 z 最小值，单位米。",
     "target_z_max": "目标采样区域 z 最大值，单位米。",
-    "curriculum_fixed_episodes": "课程学习第 1 阶段回合数。这个阶段固定目标点，先学会靠近。",
-    "curriculum_local_random_episodes": "课程学习第 2 阶段回合数。这个阶段在固定点附近做小范围随机。",
+    "curriculum_fixed_episodes": "课程学习第 1 阶段回合数。设为 0 表示关闭该阶段，直接使用随机目标。",
+    "curriculum_local_random_episodes": "课程学习第 2 阶段回合数。设为 0 表示关闭该阶段，直接使用完整工作空间随机目标。",
     "curriculum_local_scale": "第 2 阶段采样范围相对全空间的缩放比例。",
     "fixed_target_x": "固定目标点 x 坐标。",
     "fixed_target_y": "固定目标点 y 坐标。",
     "fixed_target_z": "固定目标点 z 坐标。",
-    "control_mode": "控制模式，支持 `joint_delta` 和 `torque`。",
+    "control_mode": "控制模式，支持 `joint_delta` 和 `torque`。当前默认使用更接近 zero-arm 训练逻辑的 `torque`。",
     "torque_low": "力矩控制最小值。",
     "torque_high": "力矩控制最大值。",
     "joint_delta_scale": "关节增量控制时，每步最多改多少弧度。",
-    "action_smoothing_alpha": "动作平滑系数。越大越依赖上一时刻控制量。",
+    "action_smoothing_alpha": "动作平滑系数。越大越依赖上一时刻控制量；设为 0 表示不做平滑。",
     "position_kp": "关节位置 PD 的比例增益。",
     "position_kd": "关节位置 PD 的阻尼增益。",
     "gravity_compensation": "目标滑块的固定补偿控制值。",
@@ -58,13 +58,20 @@ ENV_PARAMETER_DOCS: dict[str, str] = {
     "distance_weight": "基础距离惩罚权重。",
     "progress_reward_gain": "距离变近时的奖励系数。",
     "regress_penalty_gain": "距离变远时的惩罚系数。",
+    "phase_thresholds": "阶段性距离奖励的阈值列表。第一次穿过某个阈值时发一次奖励。",
+    "phase_rewards": "和 `phase_thresholds` 一一对应的一次性奖励值。",
+    "speed_penalty_threshold": "末端速度超过该阈值时施加速度惩罚。",
+    "speed_penalty_value": "末端速度过快时的固定惩罚值。",
     "direction_reward_gain": "运动方向和目标方向一致时的奖励系数。",
     "action_l2_penalty": "动作幅值惩罚系数。",
     "action_smoothness_penalty": "动作变化惩罚系数。",
-    "joint_velocity_penalty": "关节速度惩罚系数。",
+    "joint_velocity_penalty": "上一时刻与当前关节速度差值的惩罚系数。",
     "collision_penalty": "碰撞时的一次性惩罚。",
     "success_bonus": "成功时的一次性奖励。",
-    "success_speed_bonus": "成功且末端较稳时的额外奖励。",
+    "success_remaining_step_gain": "成功后根据剩余步数追加奖励的系数。",
+    "success_speed_bonus_very_slow": "成功时末端速度非常小时的额外奖励。",
+    "success_speed_bonus_slow": "成功时末端速度较小时的额外奖励。",
+    "success_speed_bonus_medium": "成功时末端速度中等时的额外奖励。",
     "runaway_distance_threshold": "距离过大时判定为跑飞的阈值。",
     "runaway_penalty": "跑飞时的一次性惩罚。",
 }
@@ -72,7 +79,7 @@ ENV_PARAMETER_DOCS: dict[str, str] = {
 
 TRAIN_PARAMETER_DOCS: dict[str, str] = {
     # 训练参数说明表和环境参数说明表作用相同，只是面向训练脚本。
-    "algo": "训练或测试算法，支持 `td3`、`sac`、`ppo`。",
+    "algo": "训练或测试算法，支持 `td3`、`sac`、`ppo`。默认值改成了更接近参考训练线的 `td3`。",
     "run_name": "实验名字。所有产物都会保存在这个名字对应的目录下。",
     "seed": "随机种子。",
     "total_timesteps": "总训练步数。",
@@ -92,7 +99,7 @@ TRAIN_PARAMETER_DOCS: dict[str, str] = {
     "policy_delay": "TD3 actor 更新延迟。",
     "target_policy_noise": "TD3 目标策略平滑噪声。",
     "target_noise_clip": "TD3 目标噪声裁剪范围。",
-    "action_noise_sigma": "TD3 探索动作噪声标准差。",
+    "action_noise_sigma": "TD3 探索动作噪声标准差。动作空间仍是归一化区间时，这个值表示归一化尺度下的噪声。",
     "actor_layers": "策略网络隐藏层结构。",
     "critic_layers": "价值网络隐藏层结构。",
     "ppo_n_steps": "PPO rollout 长度。",
@@ -121,8 +128,8 @@ class UR5ReachEnvConfig:
     # 模型与仿真时间步设置。`model_xml` 使用仓库相对路径，保证跨机器迁移时不用改绝对路径。
     # `frame_skip` 决定“一个 RL step 里包含多少个 MuJoCo 物理子步”。
     model_xml: str = "assets/robotiq_cxy/lab_env.xml"
-    frame_skip: int = 2
-    episode_length: int = 600
+    frame_skip: int = 1
+    episode_length: int = 3000
     render_camera_name: str = "workbench_camera"
 
     # 目标采样空间。前三个课程阶段都会从这里定义的工作空间中取子集。
@@ -136,8 +143,8 @@ class UR5ReachEnvConfig:
 
     # 课程学习参数。先固定目标，再局部随机，最后全空间随机。
     # 这组参数会在环境里决定 `_stage_name()` 和 `_sample_target_position()` 的行为。
-    curriculum_fixed_episodes: int = 250
-    curriculum_local_random_episodes: int = 1000
+    curriculum_fixed_episodes: int = 0
+    curriculum_local_random_episodes: int = 0
     curriculum_local_scale: float = 0.35
     fixed_target_x: float = -0.72
     fixed_target_y: float = 0.28
@@ -145,11 +152,11 @@ class UR5ReachEnvConfig:
 
     # 动作与控制参数。`joint_delta` 更稳定，`torque` 更接近直接力矩控制。
     # 这些字段会直接参与 `_action_to_control()` 和 `_compute_pd_torque()`。
-    control_mode: str = "joint_delta"
-    torque_low: float = -10.0
-    torque_high: float = 10.0
+    control_mode: str = "torque"
+    torque_low: float = -15.0
+    torque_high: float = 15.0
     joint_delta_scale: float = 0.06
-    action_smoothing_alpha: float = 0.70
+    action_smoothing_alpha: float = 0.0
     position_kp: float = 55.0
     position_kd: float = 4.0
     gravity_compensation: float = -1.0
@@ -162,25 +169,32 @@ class UR5ReachEnvConfig:
     home_joint3: float = math.radians(115.0)
 
     # 课程学习不同阶段使用不同成功阈值，阶段越后要求越严格。
-    success_threshold_stage1: float = 0.030
-    success_threshold_stage2: float = 0.020
-    success_threshold_stage3: float = 0.012
+    success_threshold_stage1: float = 0.010
+    success_threshold_stage2: float = 0.010
+    success_threshold_stage3: float = 0.010
 
     # 奖励项参数。环境里的 reward 会逐项读取这些系数并写入 reward_terms。
     # 这些字段最终会进入 `_compute_reward()` 里的各个 reward term。
-    step_penalty: float = 0.02
-    distance_weight: float = 0.90
-    progress_reward_gain: float = 120.0
-    regress_penalty_gain: float = 70.0
-    direction_reward_gain: float = 1.5
-    action_l2_penalty: float = 0.015
-    action_smoothness_penalty: float = 0.020
-    joint_velocity_penalty: float = 0.010
-    collision_penalty: float = 250.0
-    success_bonus: float = 350.0
-    success_speed_bonus: float = 60.0
-    runaway_distance_threshold: float = 1.40
-    runaway_penalty: float = 120.0
+    step_penalty: float = 0.10
+    distance_weight: float = 0.80
+    progress_reward_gain: float = 1.0
+    regress_penalty_gain: float = 0.8
+    phase_thresholds: tuple[float, ...] = (0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002)
+    phase_rewards: tuple[float, ...] = (100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0)
+    speed_penalty_threshold: float = 0.5
+    speed_penalty_value: float = 0.2
+    direction_reward_gain: float = 1.0
+    action_l2_penalty: float = 0.0
+    action_smoothness_penalty: float = 0.0
+    joint_velocity_penalty: float = 0.03
+    collision_penalty: float = 5000.0
+    success_bonus: float = 10000.0
+    success_remaining_step_gain: float = 4.0
+    success_speed_bonus_very_slow: float = 2000.0
+    success_speed_bonus_slow: float = 1000.0
+    success_speed_bonus_medium: float = 500.0
+    runaway_distance_threshold: float = 10.0
+    runaway_penalty: float = 0.0
 
 
 @dataclass
@@ -192,10 +206,10 @@ class RLTrainConfig:
 
     # 实验标识与全局控制参数。
     # `run_name` 不只是日志名字，也直接决定模型保存目录名。
-    algo: str = "sac"
-    run_name: str = "ur5_zero_repro"
+    algo: str = "td3"
+    run_name: str = "ur5_zero_aligned_main"
     seed: int = 42
-    total_timesteps: int = 1_500_000
+    total_timesteps: int = 5_000_000
     n_envs: int = 1
     eval_freq: int = 5_000
     eval_episodes: int = 5
@@ -205,22 +219,22 @@ class RLTrainConfig:
     # 通用优化参数。SAC / TD3 / PPO 都会读取其中的一部分。
     # 虽然不是所有算法都使用这些字段，但统一放在一个 dataclass 里方便 CLI 管理。
     learning_rate: float = 3e-4
-    buffer_size: int = 1_000_000
+    buffer_size: int = 3_000_000
     learning_starts: int = 10_000
     batch_size: int = 256
     tau: float = 0.005
     gamma: float = 0.99
     train_freq: int = 1
     gradient_steps: int = 1
-    policy_delay: int = 2
+    policy_delay: int = 4
     target_policy_noise: float = 0.20
     target_noise_clip: float = 0.50
-    action_noise_sigma: float = 0.15
+    action_noise_sigma: float = 0.1667
 
     # 网络结构参数。主线统一使用 MLP，actor / critic 层数在这里集中定义。
     # 这些字段会在 `build_policy_kwargs()` 里转换成 SB3 的网络结构描述。
-    actor_layers: tuple[int, int, int] = (256, 256, 256)
-    critic_layers: tuple[int, int, int] = (256, 256, 256)
+    actor_layers: tuple[int, int, int] = (512, 512, 256)
+    critic_layers: tuple[int, int, int] = (512, 512, 256)
 
     # PPO 特有参数。
     ppo_n_steps: int = 2048

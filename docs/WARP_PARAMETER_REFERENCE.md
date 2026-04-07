@@ -18,7 +18,7 @@
 | `target_x_min/max` | 全随机采样时目标点 x 范围。 |
 | `target_y_min/max` | 全随机采样时目标点 y 范围。 |
 | `target_z_min/max` | 全随机采样时目标点 z 范围。 |
-| `target_sampling_mode` | 目标采样模式，可选 `full_random`、`small_random`、`fixed`。 |
+| `target_sampling_mode` | 目标采样模式，可选 `full_random`、`small_random`、`fixed`。默认使用 `full_random`。 |
 | `target_range_scale` | 局部随机采样比例。 |
 | `fixed_target_x/y/z` | 固定目标点坐标。 |
 | `success_threshold` | 全随机阶段成功阈值。 |
@@ -26,8 +26,8 @@
 | `stage2_success_threshold` | 局部随机阶段成功阈值。 |
 | `torque_low/high` | 力矩裁剪边界。 |
 | `action_target_scale` | 力矩模式下的动作缩放比例。 |
-| `action_smoothing_alpha` | 动作平滑系数。 |
-| `controller_mode` | 控制模式，可选 `torque` 或 `joint_position_delta`。 |
+| `action_smoothing_alpha` | 动作平滑系数。设为 `0` 时不做平滑。 |
+| `controller_mode` | 控制模式，可选 `torque` 或 `joint_position_delta`。默认使用 `torque`。 |
 | `joint_position_delta_scale` | 位置增量控制时每步允许的目标关节增量。 |
 | `position_control_kp/kd` | 位置控制器的比例与阻尼参数。 |
 | `goal_observation` | 是否在观测后部显式拼接 achieved/desired goal。 |

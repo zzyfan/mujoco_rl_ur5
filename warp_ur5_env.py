@@ -483,11 +483,21 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
 
         # 先叠加 dense reward 的各个组成项，再视情况切到 sparse reward。
         #
+        # 这里采用与主线相同的 zero 风格奖励结构：
+        # - 每步固定时间惩罚
+        # - 历史最优距离改进奖励
+        # - 远离上一时刻目标时的惩罚
+        # - 首次跨越距离阈值时的一次性阶段奖励
+        # - 速度过快惩罚、朝向目标运动奖励
+        # - 关节速度突变惩罚
+        # - 成功奖励、剩余步数奖励和速度稳定奖励
+        # - 碰撞大惩罚
+        #
         # 第一组是“每步都存在”的基础项：时间惩罚和距离惩罚。
         reward = jp.asarray(-self._config.step_penalty, dtype=jp.float32)
         reward += -self._config.base_distance_weight * jp.sqrt(jp.maximum(distance, 1e-9))
 
-        # 第二组是“是否比之前更好”的增量项：靠近奖励、远离惩罚、最优距离更新。
+        # 第二组是“是否比之前更好”的增量项：靠近历史最优点时发奖励，远离上一时刻时发惩罚。
         improved = distance < state.info["min_distance"]
         regressed = distance > state.info["prev_distance"]
         reward += jp.where(improved, self._config.improvement_gain * (state.info["min_distance"] - distance), 0.0)
@@ -500,7 +510,7 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         reward += jp.sum(new_phase_hits.astype(jp.float32) * self._phase_rewards)
         phase_hits = jp.logical_or(phase_hits, new_phase_hits)
 
-        # 第四组是运动质量项：速度过快惩罚、朝向目标运动奖励、动作变化惩罚。
+        # 第四组是运动质量项：速度过快惩罚、朝向目标运动奖励、关节速度变化惩罚。
         reward -= jp.where(ee_speed > self._config.speed_penalty_threshold, self._config.speed_penalty_value, 0.0)
         to_target = relative_pos / jp.maximum(distance, 1e-6)
         move_dir = ee_vel / jp.maximum(ee_speed, 1e-6)
@@ -511,9 +521,14 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         reward -= self._config.joint_vel_change_penalty_gain * jp.sum(joint_vel_change)
         reward -= self._config.action_magnitude_penalty_gain * jp.mean(jp.abs(torque_cmd))
         reward -= self._config.action_change_penalty_gain * jp.mean(jp.abs(torque_cmd - state.info["prev_torque"]))
-        reward -= jp.where(jp.logical_and(distance > self._config.idle_distance_threshold, ee_speed < self._config.idle_speed_threshold), self._config.idle_penalty_value, 0.0)
+        reward -= jp.where(
+            jp.logical_and(distance > self._config.idle_distance_threshold, ee_speed < self._config.idle_speed_threshold),
+            self._config.idle_penalty_value,
+            0.0,
+        )
 
         # 第五组是诊断项：如果距离、末端速度或关节速度明显失控，就标记为 runaway。
+        # 这里默认不让 runaway 直接结束回合，只把它保存在 metrics 里做观察。
         runaway = jp.logical_or(
             distance > self._config.runaway_distance_threshold,
             jp.logical_or(
@@ -537,7 +552,11 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         reward += jp.where(success & (ee_speed < 0.01), self._config.success_speed_bonus_very_slow, 0.0)
         reward += jp.where(success & (ee_speed >= 0.01) & (ee_speed < 0.05), self._config.success_speed_bonus_slow, 0.0)
         reward += jp.where(success & (ee_speed >= 0.05) & (ee_speed < 0.1), self._config.success_speed_bonus_medium, 0.0)
-        reward += jp.where(jp.logical_and(collision, jp.logical_not(success)), -self._config.step_penalty * remaining_steps.astype(jp.float32), 0.0)
+        reward += jp.where(
+            jp.logical_and(collision, jp.logical_not(success)),
+            -self._config.step_penalty * remaining_steps.astype(jp.float32),
+            0.0,
+        )
 
         # done 判定由四类条件组成：成功、碰撞、数值异常、超时。
         nan_done = jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
