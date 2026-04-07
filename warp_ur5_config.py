@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -212,12 +214,25 @@ def project_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+def artifact_scope() -> str:
+    # 返回当前 Warp 训练产物应该写入的环境分区。
+    #
+    # 默认规则与主线保持一致：
+    # - Windows 视为本地开发机，写入 `local`
+    # - 其他系统视为服务器训练机，写入 `server`
+    # - `UR5_ARTIFACT_SCOPE` 可显式覆盖
+    explicit = os.environ.get("UR5_ARTIFACT_SCOPE", "").strip().lower()
+    if explicit in {"local", "server"}:
+        return explicit
+    return "local" if platform.system() == "Windows" else "server"
+
+
 def build_warp_run_dir(algo: str, run_name: str) -> Path:
     # 返回单个 Warp 实验的产物目录。
     #
-    # Warp 训练线统一保存到 `runs/warp/{algo}/{run_name}`。
+    # Warp 训练线统一保存到 `runs/{local|server}/warp/{algo}/{run_name}`。
     # 路径结构和主线保持同一风格，只是训练线名从 `main` 换成 `warp`。
-    return project_root() / "runs" / "warp" / algo / run_name
+    return project_root() / "runs" / artifact_scope() / "warp" / algo / run_name
 
 
 def save_warp_configuration(run_dir: Path, env_config: WarpUR5EnvConfig, train_config: WarpTrainConfig, runtime: str) -> None:

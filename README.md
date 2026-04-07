@@ -257,7 +257,7 @@ python test_ur5_reach_warp.py \
 所有训练产物都保存在仓库内相对路径，并按训练线、算法和实验名区分：
 
 ```text
-runs/main/{algo}/{run_name}/
+runs/{local|server}/main/{algo}/{run_name}/
   run_config.json
   tensorboard/
   best_model/
@@ -274,11 +274,17 @@ runs/main/{algo}/{run_name}/
 Warp 训练线写入：
 
 ```text
-runs/warp/{algo}/{run_name}/
+runs/{local|server}/warp/{algo}/{run_name}/
   config.json
   checkpoints/
   final_policy.msgpack
 ```
+
+说明：
+
+- 本地开发机默认写入 `runs/local/...`。
+- 服务器训练机默认写入 `runs/server/...`。
+- 如需手动覆盖，可设置环境变量 `UR5_ARTIFACT_SCOPE=local` 或 `UR5_ARTIFACT_SCOPE=server`。
 
 ## Algorithms
 

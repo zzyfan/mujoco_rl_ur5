@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import platform
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -288,13 +290,29 @@ def project_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+def artifact_scope() -> str:
+    # 返回当前训练产物应该写入的环境分区。
+    #
+    # 规则：
+    # 1. `UR5_ARTIFACT_SCOPE` 显式指定时优先使用。
+    # 2. Windows 默认视为本地开发机，写入 `local`。
+    # 3. 其他系统默认视为服务器训练机，写入 `server`。
+    #
+    # 这样本地和服务器跑出来的模型会自动落在不同目录下；
+    # 如果未来有更复杂的部署方式，也可以通过环境变量手动覆盖。
+    explicit = os.environ.get("UR5_ARTIFACT_SCOPE", "").strip().lower()
+    if explicit in {"local", "server"}:
+        return explicit
+    return "local" if platform.system() == "Windows" else "server"
+
+
 def build_run_paths(algo: str, run_name: str, root: Path | None = None) -> RunPaths:
     # 根据训练线、算法名和实验名构造一整套产物路径。
     #
-    # 当前主线统一写到 `runs/main/{algo}/{run_name}`。
-    # 先确定仓库根目录，再一层层往下拼装出 runs/main/{algo}/{run_name} 结构。
+    # 当前主线统一写到 `runs/{local|server}/main/{algo}/{run_name}`。
+    # 先确定仓库根目录，再一层层往下拼装出分环境的产物目录结构。
     root_path = root or project_root()
-    runs_root = root_path / "runs"
+    runs_root = root_path / "runs" / artifact_scope()
     line_root = runs_root / "main"
     algo_root = line_root / algo
     run_dir = algo_root / run_name
