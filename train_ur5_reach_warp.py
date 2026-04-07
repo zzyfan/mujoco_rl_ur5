@@ -71,27 +71,27 @@ def _rate_count_summary(rate: float, total: int) -> str:
 def build_parser() -> argparse.ArgumentParser:
     # 构造 Warp 训练 CLI（简化版）。
     parser = argparse.ArgumentParser(description="UR5 Warp 训练入口（zero-arm 风格）")
-    parser.add_argument("--algo", choices=["sac", "ppo"], default="sac", help="训练算法")
-    parser.add_argument("--run-name", type=str, default="ur5_warp_run", help="实验名字")
-    parser.add_argument("--seed", type=int, default=42, help="随机种子")
-    parser.add_argument("--num-timesteps", type=int, default=5_000_000, help="总训练步数")
-    parser.add_argument("--num-envs", type=int, default=256, help="并行训练环境数")
-    parser.add_argument("--num-eval-envs", type=int, default=128, help="并行评估环境数")
-    parser.add_argument("--num-evals", type=int, default=10, help="训练期间评估次数")
-    parser.add_argument("--learning-rate", type=float, default=3e-4, help="学习率")
-    parser.add_argument("--discounting", type=float, default=0.99, help="折扣因子")
-    parser.add_argument("--reward-scaling", type=float, default=1.0, help="奖励缩放")
-    parser.add_argument("--normalize-observations", action=argparse.BooleanOptionalAction, default=True, help="是否标准化观测")
-    parser.add_argument("--entropy-cost", type=float, default=1e-4, help="PPO 熵正则系数")
-    parser.add_argument("--unroll-length", type=int, default=10, help="PPO rollout 长度")
-    parser.add_argument("--batch-size", type=int, default=512, help="训练 batch 大小")
-    parser.add_argument("--num-minibatches", type=int, default=8, help="PPO mini-batch 数")
-    parser.add_argument("--num-updates-per-batch", type=int, default=4, help="PPO 每批重复更新次数")
-    parser.add_argument("--sac-tau", type=float, default=0.005, help="SAC 目标网络软更新系数")
-    parser.add_argument("--sac-min-replay-size", type=int, default=8192, help="SAC 回放池预热大小")
-    parser.add_argument("--sac-max-replay-size", type=int, default=3_000_000, help="SAC 回放池容量")
-    parser.add_argument("--sac-grad-updates-per-step", type=int, default=1, help="SAC 每步梯度更新次数")
-    parser.add_argument("--dry-run", action="store_true", help="只初始化环境和配置，不启动训练")
+    parser.add_argument("--algo", choices=["sac", "ppo"], default="sac", help="训练算法")  # 算法选择
+    parser.add_argument("--run-name", type=str, default="ur5_warp_run", help="实验名字")  # 输出目录名
+    parser.add_argument("--seed", type=int, default=42, help="随机种子")  # 训练可复现性
+    parser.add_argument("--num-timesteps", type=int, default=5_000_000, help="总训练步数")  # 训练总步数
+    parser.add_argument("--num-envs", type=int, default=256, help="并行训练环境数")  # 采样并行度
+    parser.add_argument("--num-eval-envs", type=int, default=128, help="并行评估环境数")  # 评估并行度
+    parser.add_argument("--num-evals", type=int, default=10, help="训练期间评估次数")  # 评估次数
+    parser.add_argument("--learning-rate", type=float, default=3e-4, help="学习率")  # Adam 学习率
+    parser.add_argument("--discounting", type=float, default=0.99, help="折扣因子")  # gamma
+    parser.add_argument("--reward-scaling", type=float, default=1.0, help="奖励缩放")  # reward scale
+    parser.add_argument("--normalize-observations", action=argparse.BooleanOptionalAction, default=True, help="是否标准化观测")  # obs 归一化
+    parser.add_argument("--entropy-cost", type=float, default=1e-4, help="PPO 熵正则系数")  # PPO 探索
+    parser.add_argument("--unroll-length", type=int, default=10, help="PPO rollout 长度")  # PPO rollout
+    parser.add_argument("--batch-size", type=int, default=512, help="训练 batch 大小")  # batch 大小
+    parser.add_argument("--num-minibatches", type=int, default=8, help="PPO mini-batch 数")  # PPO 分块
+    parser.add_argument("--num-updates-per-batch", type=int, default=4, help="PPO 每批重复更新次数")  # PPO 重复次数
+    parser.add_argument("--sac-tau", type=float, default=0.005, help="SAC 目标网络软更新系数")  # SAC tau
+    parser.add_argument("--sac-min-replay-size", type=int, default=8192, help="SAC 回放池预热大小")  # SAC 预热
+    parser.add_argument("--sac-max-replay-size", type=int, default=3_000_000, help="SAC 回放池容量")  # SAC 容量
+    parser.add_argument("--sac-grad-updates-per-step", type=int, default=1, help="SAC 每步梯度更新次数")  # SAC 更新
+    parser.add_argument("--dry-run", action="store_true", help="只初始化环境和配置，不启动训练")  # 仅检查
     return parser
 
 
@@ -114,9 +114,9 @@ def train(train_config: dict, env_config: dict) -> int:
     # 4. 根据算法选择 Brax PPO 或 SAC 训练器。
     # 5. 保存最终策略参数。
     # 第一步：先检查外部依赖是否齐全。
-    if not playground_importable():
+    if not playground_importable():  # 依赖检查
         raise RuntimeError("未检测到 `mujoco_playground`，无法启动 Warp 训练线。")
-    ensure_warp_runtime()
+    ensure_warp_runtime()  # 检查 Warp 运行时与驱动版本
 
     # 这些依赖只在真正训练时导入，避免 `--help` 或静态阅读时就要求完整 Warp 环境。
     from brax.io import model as brax_model
@@ -126,13 +126,13 @@ def train(train_config: dict, env_config: dict) -> int:
     from tqdm import tqdm
 
     # 先拿默认配置，再用覆盖字典更新。
-    cfg = default_config()
+    cfg = default_config()  # 环境默认配置
     for key, value in env_config.items():
         cfg[key] = value
     cfg.ctrl_dt = float(cfg.sim_dt) * int(cfg.frame_skip)
 
     # 第三步：准备输出目录并把配置落盘。
-    run_dir = Path("./warp_runs") / str(train_config["algo"]) / str(train_config["run_name"])
+    run_dir = Path("./warp_runs") / str(train_config["algo"]) / str(train_config["run_name"])  # 输出目录
     checkpoint_dir = run_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "config.json").write_text("{}")
@@ -143,17 +143,17 @@ def train(train_config: dict, env_config: dict) -> int:
     )
 
     # 第四步：创建训练环境和评估环境。
-    env = UR5WarpReachEnv(config=cfg)
+    env = UR5WarpReachEnv(config=cfg)  # 训练环境
     print(f"obs_dim={env.observation_size} action_dim={env.action_size}")
     if train_config["dry_run"]:
         # dry-run 模式只检查环境和配置是否能正确初始化。
         return 0
-    eval_env = UR5WarpReachEnv(config=cfg)
+    eval_env = UR5WarpReachEnv(config=cfg)  # 评估环境
     # MuJoCo Playground 提供的包装器会把环境包装成 Brax 训练器期望的接口。
     wrap_env_fn = functools.partial(wrapper.wrap_for_brax_training, full_reset=True)
 
     # 第五步：初始化命令行进度条和时间统计。
-    total_steps = max(int(train_config["num_timesteps"]), 1)
+    total_steps = max(int(train_config["num_timesteps"]), 1)  # 进度条总步数
     progress_bar = tqdm(total=total_steps, desc=f"warp:{train_config['algo']}", unit="step")
     last_step = 0
     start_time = time.monotonic()

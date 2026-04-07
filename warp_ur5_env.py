@@ -26,64 +26,74 @@ from mujoco_playground._src import mjx_env
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 _DEFAULTS = dict(
-    model_xml="assets/robotiq_cxy/lab_env.xml",
-    sim_dt=0.02,
-    frame_skip=1,
-    episode_length=3000,
-    naconmax=128,
-    naccdmax=128,
-    njmax=64,
+    # 模型与仿真步长
+    model_xml="assets/robotiq_cxy/lab_env.xml",  # MuJoCo XML 路径（相对当前文件）
+    sim_dt=0.02,  # 物理仿真步长（秒）
+    frame_skip=1,  # 每个环境 step 内执行的物理子步数
+    episode_length=3000,  # 每回合最大步数
+    naconmax=128,  # 最大接触数量（MJX buffer）
+    naccdmax=128,  # 最大 CCD 接触数量（MJX buffer）
+    njmax=64,  # 最大关节约束数量（MJX buffer）
+    # 目标点采样范围（工作空间）
     target_x_min=-0.95,
     target_x_max=-0.60,
     target_y_min=0.15,
     target_y_max=0.50,
     target_z_min=0.12,
     target_z_max=0.30,
-    target_sampling_mode="full_random",
-    target_range_scale=0.35,
-    fixed_target_x=None,
+    # 目标点采样策略
+    target_sampling_mode="full_random",  # fixed / small_random / full_random
+    target_range_scale=0.35,  # small_random 时的采样范围缩放
+    fixed_target_x=None,  # 固定目标 x（None 表示不固定）
     fixed_target_y=None,
     fixed_target_z=None,
+    # 成功阈值（不同采样模式可用不同阈值）
     success_threshold=0.010,
-    stage1_success_threshold=0.010,
-    stage2_success_threshold=0.010,
-    torque_low=-15.0,
-    torque_high=15.0,
-    action_target_scale=1.0,
-    action_smoothing_alpha=0.0,
-    controller_mode="torque",
-    joint_position_delta_scale=0.06,
-    position_control_kp=55.0,
-    position_control_kd=4.0,
-    goal_observation=False,
-    reward_mode="dense",
-    fixed_gripper_ctrl=0.0,
-    enable_gravity_motors=True,
-    gravity_ctrl=-1.0,
+    stage1_success_threshold=0.010,  # fixed 模式使用
+    stage2_success_threshold=0.010,  # small_random 模式使用
+    # 控制与动作映射
+    torque_low=-15.0,  # 力矩下界
+    torque_high=15.0,  # 力矩上界
+    action_target_scale=1.0,  # 动作映射比例（1.0 为满量程）
+    action_smoothing_alpha=0.0,  # 动作平滑系数（越大越平滑）
+    controller_mode="torque",  # torque / joint_position_delta
+    joint_position_delta_scale=0.06,  # 关节位置增量比例（position 模式）
+    position_control_kp=55.0,  # 位置控制 P 增益
+    position_control_kd=4.0,  # 位置控制 D 增益
+    # 观测/奖励模式
+    goal_observation=False,  # 是否拼接 achieved/desired goal
+    reward_mode="dense",  # dense / sparse
+    # 夹爪与重力补偿
+    fixed_gripper_ctrl=0.0,  # 固定夹爪控制量
+    enable_gravity_motors=True,  # 是否启用重力补偿执行器
+    gravity_ctrl=-1.0,  # 重力补偿执行器控制值
+    # 初始姿态（前三个关节角）
     home_joint1=0.5183627878423158,
     home_joint2=-1.4835298641951802,
     home_joint3=2.007128639793479,
-    step_penalty=0.10,
-    base_distance_weight=0.80,
-    improvement_gain=1.0,
-    regress_gain=0.8,
-    speed_penalty_threshold=0.5,
-    speed_penalty_value=0.2,
-    direction_reward_gain=1.0,
-    joint_vel_change_penalty_gain=0.03,
-    action_magnitude_penalty_gain=0.0,
-    action_change_penalty_gain=0.0,
-    idle_distance_threshold=0.08,
-    idle_speed_threshold=0.015,
-    idle_penalty_value=0.0,
-    phase_thresholds=(0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002),
-    phase_rewards=(100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0),
-    success_bonus=10000.0,
-    success_remaining_step_gain=4.0,
-    success_speed_bonus_very_slow=2000.0,
-    success_speed_bonus_slow=1000.0,
-    success_speed_bonus_medium=500.0,
-    collision_penalty_value=5000.0,
+    # 奖励权重与阈值
+    step_penalty=0.10,  # 每步时间惩罚
+    base_distance_weight=0.80,  # 距离惩罚权重
+    improvement_gain=1.0,  # 靠近目标的增量奖励权重
+    regress_gain=0.8,  # 远离目标的惩罚权重
+    speed_penalty_threshold=0.5,  # 末端速度惩罚阈值
+    speed_penalty_value=0.2,  # 超速惩罚强度
+    direction_reward_gain=1.0,  # 朝目标运动方向奖励
+    joint_vel_change_penalty_gain=0.03,  # 关节速度变化惩罚
+    action_magnitude_penalty_gain=0.0,  # 动作幅度惩罚（默认关闭）
+    action_change_penalty_gain=0.0,  # 动作变化惩罚（默认关闭）
+    idle_distance_threshold=0.08,  # 停滞惩罚距离阈值
+    idle_speed_threshold=0.015,  # 停滞惩罚速度阈值
+    idle_penalty_value=0.0,  # 停滞惩罚强度（默认关闭）
+    phase_thresholds=(0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002),  # 阶段距离阈值
+    phase_rewards=(100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0),  # 阶段奖励
+    success_bonus=10000.0,  # 成功一次性奖励
+    success_remaining_step_gain=4.0,  # 剩余步数奖励权重
+    success_speed_bonus_very_slow=2000.0,  # 成功且速度极慢奖励
+    success_speed_bonus_slow=1000.0,  # 成功且速度较慢奖励
+    success_speed_bonus_medium=500.0,  # 成功且速度中等奖励
+    collision_penalty_value=5000.0,  # 碰撞惩罚
+    # 失控判定（仅用于 metrics，不一定终止）
     runaway_distance_threshold=10.0,
     runaway_ee_speed_threshold=50.0,
     runaway_joint_velocity_threshold=100.0,
@@ -112,10 +122,10 @@ def default_config() -> config_dict.ConfigDict:
     # 这里额外补上两个字段：
     # - `ctrl_dt`：控制周期，等于单个物理步长乘以 frame_skip
     # - `impl`：明确告诉 MJX / Playground 使用 Warp 后端
-    cfg = config_dict.create(**_DEFAULTS)
-    cfg.ctrl_dt = cfg.sim_dt * max(int(cfg.frame_skip), 1)
-    cfg.action_repeat = 1
-    cfg.impl = _WARP_IMPL
+    cfg = config_dict.create(**_DEFAULTS)  # 转成 ConfigDict，便于下游统一读取
+    cfg.ctrl_dt = cfg.sim_dt * max(int(cfg.frame_skip), 1)  # 控制周期 = sim_dt * frame_skip
+    cfg.action_repeat = 1  # Warp 线默认不额外重复动作
+    cfg.impl = _WARP_IMPL  # 强制使用 warp 后端
     return cfg
 
 
@@ -129,7 +139,7 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         # 把模型切换到 Warp 后端。
         # 如果外部已经传了 ConfigDict，就复制一份并展开引用；
         # 否则直接从默认配置开始。
-        base_config = config.copy_and_resolve_references() if config is not None else default_config()
+        base_config = config.copy_and_resolve_references() if config is not None else default_config()  # 基础配置
         if config_overrides:
             # `config_overrides` 允许训练脚本在不改默认配置对象的前提下，临时覆盖某些字段。
             base_config.update_from_flattened_dict(config_overrides)
@@ -138,7 +148,7 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         base_config.frame_skip = max(int(base_config.frame_skip), 1)
         base_config.ctrl_dt = float(base_config.sim_dt) * int(base_config.frame_skip)
         # `MjxEnv` 基类会保存配置、时间步和若干环境元信息。
-        super().__init__(base_config, None)
+        super().__init__(base_config, None)  # 调用 MjxEnv 基类初始化
 
         # 读取仓库里的 MuJoCo XML，并准备 host 侧 MuJoCo 模型。
         xml_path = (PROJECT_ROOT / self._config.model_xml).resolve()
@@ -464,12 +474,12 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         # Warp 线使用函数式状态，因此 `reset()` 会直接返回新的 `mjx_env.State`，
         # 而不是像 Gymnasium 一样把状态保存在类实例里。
         # 先拆随机数，再采样目标点。
-        rng, target_rng = jax.random.split(rng)
-        target_pos = self._sample_target(target_rng)
+        rng, target_rng = jax.random.split(rng)  # 拆随机数，保证纯函数式
+        target_pos = self._sample_target(target_rng)  # 采样目标点
         # 用目标点构造新的 qpos，并用零动作生成 reset 时的控制量。
-        qpos = self._build_reset_qpos(target_pos)
-        qvel = self._home_qvel
-        ctrl = self._compose_ctrl(self._zero_action)
+        qpos = self._build_reset_qpos(target_pos)  # 构造 reset 姿态
+        qvel = self._home_qvel  # 初始速度清零
+        ctrl = self._compose_ctrl(self._zero_action)  # 初始控制量
         # `mjx_env.make_data(...)` 会创建适合 MJX / Warp 执行的数据结构。
         data = mjx_env.make_data(
             self.mj_model,
@@ -482,7 +492,7 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
             njmax=self._config.njmax,
         )
         # 先做一次 forward，让 `xpos`、接触缓存等派生量更新到最新状态。
-        data = mjx.forward(self.mjx_model, data)
+        data = mjx.forward(self.mjx_model, data)  # 更新派生量
 
         # reset 后立刻构造首个观测和一组基础指标。
         ee_pos = self._get_ee_pos(data)
@@ -523,8 +533,8 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         # 3. 计算距离、速度、阶段奖励、碰撞和成功判定。
         # 4. 更新 metrics 和 info，返回新的函数式状态。
         # 先读出当前关节状态，为动作映射做准备。
-        current_joint_pos = state.data.qpos[self._arm_qpos_adr]
-        current_joint_vel = state.data.qvel[self._arm_qvel_adr]
+        current_joint_pos = state.data.qpos[self._arm_qpos_adr]  # 当前关节角
+        current_joint_vel = state.data.qvel[self._arm_qvel_adr]  # 当前关节速度
         # 这一段把策略动作转换成真正送进物理引擎的控制量。
         torque_cmd, next_target_joint_pos = self._compute_action_torque(
             action,
@@ -533,19 +543,19 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
             current_joint_pos,
             current_joint_vel,
         )
-        ctrl = self._compose_ctrl(torque_cmd)
+        ctrl = self._compose_ctrl(torque_cmd)  # 组装完整控制向量
         # `mjx_env.step(...)` 会执行若干个子步，并返回新的函数式物理状态。
-        data = mjx_env.step(self.mjx_model, state.data, ctrl, self.n_substeps)
+        data = mjx_env.step(self.mjx_model, state.data, ctrl, self.n_substeps)  # 物理推进
 
         # 根据新状态计算观测、相对位置、关节速度和末端速度。
-        task_step = state.info["task_step"] + 1
-        ee_pos = self._get_ee_pos(data)
-        ee_vel = (ee_pos - state.info["prev_ee_pos"]) / jp.maximum(jp.asarray(self.dt, dtype=jp.float32), 1e-6)
-        obs = self._get_obs(data, state.info["prev_torque"], ee_vel)
-        relative_pos = obs[0:3]
-        joint_vel = obs[9:15]
-        distance = jp.linalg.norm(relative_pos)
-        ee_speed = jp.linalg.norm(ee_vel)
+        task_step = state.info["task_step"] + 1  # 步数累加
+        ee_pos = self._get_ee_pos(data)  # 末端位置
+        ee_vel = (ee_pos - state.info["prev_ee_pos"]) / jp.maximum(jp.asarray(self.dt, dtype=jp.float32), 1e-6)  # 数值速度
+        obs = self._get_obs(data, state.info["prev_torque"], ee_vel)  # 观测向量
+        relative_pos = obs[0:3]  # 相对目标位置
+        joint_vel = obs[9:15]  # 关节速度切片
+        distance = jp.linalg.norm(relative_pos)  # 距离
+        ee_speed = jp.linalg.norm(ee_vel)  # 末端速度
 
         # 先叠加 dense reward 的各个组成项，再视情况切到 sparse reward。
         #

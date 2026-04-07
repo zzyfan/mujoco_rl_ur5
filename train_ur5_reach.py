@@ -129,7 +129,7 @@ def make_eval_env(train_env: VecNormalize) -> VecNormalize:
 
 def build_policy_kwargs() -> dict:
     # 自定义网络结构：Actor / Critic 均使用 [512, 512, 256]。
-    return {"net_arch": dict(pi=[512, 512, 256], qf=[512, 512, 256]), "activation_fn": nn.ReLU}
+    return {"net_arch": dict(pi=[512, 512, 256], qf=[512, 512, 256]), "activation_fn": nn.ReLU}  # ReLU 激活
 
 
 def train_robot_arm(
@@ -140,19 +140,24 @@ def train_robot_arm(
     render_every: int,
     device: str,
 ) -> None:
-    print("创建机械臂环境...")
+    print("创建机械臂环境...")  # 训练入口日志
     if render and n_envs > 1:
         print("已开启并行训练渲染：仅显示第 1 个环境，其余环境保持无头模式")
 
-    env = make_training_envs(n_envs=n_envs, render=render)
+    env = make_training_envs(n_envs=n_envs, render=render)  # 构造训练 VecEnv
 
     # 设置动作噪声
+    # - TD3 使用 action noise 来提升探索
+    # - SAC 自带熵正则，不强依赖外部噪声
+    # - PPO 为 on-policy，不使用动作噪声
     n_actions = env.action_space.shape[-1]
     action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=2.5 * np.ones(n_actions))
 
     policy_kwargs = build_policy_kwargs()
 
     # 创建模型
+    # 这里把各算法的关键超参写死在代码里，便于和 zero-arm 对照。
+    # 如果需要更细粒度调参，可把这些参数改为 CLI 选项。
     model_cls = _model_class(algo)
     if algo == "ppo":
         model = model_cls(
@@ -160,15 +165,15 @@ def train_robot_arm(
             env,
             verbose=1,
             device=device,
-            learning_rate=3e-4,
-            batch_size=256,
-            gamma=0.99,
-            n_steps=2048,
-            n_epochs=10,
-            gae_lambda=0.95,
-            ent_coef=0.0,
-            vf_coef=0.5,
-            clip_range=0.2,
+            learning_rate=3e-4,  # Adam 学习率
+            batch_size=256,  # 每次更新的样本数
+            gamma=0.99,  # 折扣因子
+            n_steps=2048,  # rollout 长度（每次采样的步数）
+            n_epochs=10,  # 每批数据的优化轮数
+            gae_lambda=0.95,  # GAE 优势估计参数
+            ent_coef=0.0,  # 熵正则系数（探索强度）
+            vf_coef=0.5,  # 价值函数损失系数
+            clip_range=0.2,  # PPO clip 范围
             policy_kwargs=policy_kwargs,
         )
     else:
@@ -178,17 +183,17 @@ def train_robot_arm(
             action_noise=action_noise if algo == "td3" else None,
             verbose=1,
             device=device,
-            learning_rate=3e-4,
-            buffer_size=3_000_000,
-            learning_starts=10_000,
-            batch_size=256,
-            tau=0.005,
-            gamma=0.99,
-            train_freq=1,
-            gradient_steps=1,
-            policy_delay=4 if algo == "td3" else 1,
-            target_policy_noise=0.2 if algo == "td3" else 0.0,
-            target_noise_clip=0.5 if algo == "td3" else 0.0,
+            learning_rate=3e-4,  # Adam 学习率
+            buffer_size=3_000_000,  # 回放池容量（off-policy 必需）
+            learning_starts=10_000,  # 预热步数
+            batch_size=256,  # 每次更新的样本数
+            tau=0.005,  # 目标网络软更新系数
+            gamma=0.99,  # 折扣因子
+            train_freq=1,  # 每步更新频率
+            gradient_steps=1,  # 每次采样后更新次数
+            policy_delay=4 if algo == "td3" else 1,  # TD3 延迟更新策略网络
+            target_policy_noise=0.2 if algo == "td3" else 0.0,  # TD3 目标噪声
+            target_noise_clip=0.5 if algo == "td3" else 0.0,  # TD3 目标噪声裁剪
             policy_kwargs=policy_kwargs,
         )
 
@@ -205,14 +210,14 @@ def train_robot_arm(
     save_vec_normalize_callback = SaveVecNormalizeCallback(eval_callback, verbose=1)
     manual_interrupt_callback = ManualInterruptCallback(algo=algo, verbose=1)
 
-    callbacks = [eval_callback, save_vec_normalize_callback, manual_interrupt_callback]
+    callbacks = [eval_callback, save_vec_normalize_callback, manual_interrupt_callback]  # 训练回调集合
     if render:
         callbacks.append(TrainRenderCallback(render_every=render_every, render_index=0, verbose=1))
 
-    os.makedirs("./logs", exist_ok=True)
-    os.makedirs("./models", exist_ok=True)
+    os.makedirs("./logs", exist_ok=True)  # 训练日志目录
+    os.makedirs("./models", exist_ok=True)  # 模型保存目录
 
-    print("开始训练...")
+    print("开始训练...")  # 真正进入 learn 阶段
     print("提示: 按 Ctrl+C 可以中途停止训练并保存最后一次模型数据")
     print(f"训练配置: algo={algo}, total_timesteps={total_timesteps}, n_envs={n_envs}, render={render}, render_every={render_every}")
     start_time = time.time()
@@ -224,8 +229,8 @@ def train_robot_arm(
         progress_bar=True,
     )
 
-    env.save("./models/vec_normalize.pkl")
-    model.save(f"./models/{algo}_ur5_final")
+    env.save("./models/vec_normalize.pkl")  # 保存归一化统计量
+    model.save(f"./models/{algo}_ur5_final")  # 保存最终模型
 
     end_time = time.time()
     print(f"训练完成，耗时: {end_time - start_time:.2f}秒")
@@ -237,7 +242,7 @@ def test_robot_arm(
     normalize_path: str,
     num_episodes: int,
 ) -> None:
-    print("加载模型并测试...")
+    print("加载模型并测试...")  # 测试入口日志
 
     env = DummyVecEnv([lambda: UR5ReachEnv(render_mode="human")])
     if os.path.exists(normalize_path):
@@ -257,8 +262,8 @@ def test_robot_arm(
             obs, reward, done, _info = env.step(action)
             reward_value = float(reward[0]) if isinstance(reward, np.ndarray) else float(reward)
             total_reward += reward_value
-            time.sleep(0.01)
-            env.render()
+            time.sleep(0.01)  # 控制渲染频率，防止窗口卡顿
+            env.render()  # human 渲染窗口刷新
             if bool(done):
                 print(f"Episode {episode + 1} finished after {step + 1} timesteps")
                 print(f"Episode reward: {total_reward:.3f}")
@@ -272,16 +277,16 @@ def test_robot_arm(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train or test UR5 with TD3/SAC/PPO (zero-arm style)")
-    parser.add_argument("--algo", choices=["td3", "sac", "ppo"], default="td3", help="训练算法")
-    parser.add_argument("--test", action="store_true", help="测试已训练模型")
-    parser.add_argument("--model-path", type=str, default="./models/td3_ur5_final", help="测试模型路径")
-    parser.add_argument("--normalize-path", type=str, default="./models/vec_normalize.pkl", help="归一化参数路径")
-    parser.add_argument("--episodes", type=int, default=10, help="测试回合数")
-    parser.add_argument("--total-timesteps", type=int, default=5_000_000, help="训练步数")
-    parser.add_argument("--n-envs", type=int, default=1, help="并行环境数")
-    parser.add_argument("--render", action="store_true", help="训练时打开人类可视化窗口")
-    parser.add_argument("--render-every", type=int, default=1, help="训练渲染刷新间隔")
-    parser.add_argument("--device", type=str, default="auto", help="训练设备，例如 auto/cpu/cuda")
+    parser.add_argument("--algo", choices=["td3", "sac", "ppo"], default="td3", help="训练算法")  # algo 选择
+    parser.add_argument("--test", action="store_true", help="测试已训练模型")  # 只跑测试
+    parser.add_argument("--model-path", type=str, default="./models/td3_ur5_final", help="测试模型路径")  # 模型路径
+    parser.add_argument("--normalize-path", type=str, default="./models/vec_normalize.pkl", help="归一化参数路径")  # VecNormalize
+    parser.add_argument("--episodes", type=int, default=10, help="测试回合数")  # 测试回合数
+    parser.add_argument("--total-timesteps", type=int, default=5_000_000, help="训练步数")  # 训练总步数
+    parser.add_argument("--n-envs", type=int, default=1, help="并行环境数")  # 并行环境数
+    parser.add_argument("--render", action="store_true", help="训练时打开人类可视化窗口")  # 训练渲染开关
+    parser.add_argument("--render-every", type=int, default=1, help="训练渲染刷新间隔")  # 训练渲染频率
+    parser.add_argument("--device", type=str, default="auto", help="训练设备，例如 auto/cpu/cuda")  # 训练设备
 
     args = parser.parse_args()
     if args.test:
