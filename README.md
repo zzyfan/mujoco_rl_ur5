@@ -2,10 +2,11 @@
 
 ## Overview
 
-本仓库实现 `UR5` 到点任务的强化学习训练与测试流程，包含主线 MuJoCo + Stable-Baselines3 实现，以及可选的纯 GPU Warp 训练线。
+本仓库实现 `UR5` 到点任务的强化学习训练与测试流程，当前包含三条训练线：主线 MuJoCo + Stable-Baselines3、可选的纯 GPU Warp 训练线，以及新增的 `mjlab` manager-based 训练线。
 
 项目内容聚焦以下方向：
 - `UR5` 到点任务环境与训练入口
+- `mjlab` 版 manager-based 任务迁移
 - 面向学习的代码注释、参数说明和实现文档
 - 兼顾本地调试、服务器训练和跨机器迁移的目录与配置设计
 
@@ -17,6 +18,7 @@ assets/
     lab_env.xml
     meshes/
 docs/
+  MJLAB_SETUP.md
   IMPLEMENTATION_GUIDE.md
   LIBRARY_USAGE.md
   PARAMETER_REFERENCE.md
@@ -29,7 +31,10 @@ notebooks/
   03_warp_code_learning_walkthrough.ipynb
   04_cli_parameter_guide.ipynb
   05_library_usage_guide.ipynb
+play_ur5_reach_mjlab.py
+mjlab_ur5_task.py
 train_ur5_reach.py
+train_ur5_reach_mjlab.py
 ur5_reach_config.py
 ur5_reach_env.py
 train_ur5_reach_warp.py
@@ -37,6 +42,7 @@ test_ur5_reach_warp.py
 warp_ur5_config.py
 warp_ur5_env.py
 warp_ur5_runtime.py
+pyproject.toml
 requirements.txt
 requirements-warp.txt
 Dockerfile
@@ -71,6 +77,20 @@ assets/robotiq_cxy/meshes/
 - 支持 `td3`、`sac`、`ppo`。
 - 负责环境构建、模型初始化、回调注册、模型保存和评估流程。
 
+## MJLAB Pipeline
+
+`mjlab_ur5_task.py`
+- 定义 `mjlab` 版 UR5 reach 任务。
+- 负责 scene、observation、action、event、reward 和 termination 的 manager-based 组织。
+
+`train_ur5_reach_mjlab.py`
+- `mjlab` 训练入口。
+- 直接复用官方 `launch_training()`，同时保留仓库自己的 reach 任务参数定义。
+
+`play_ur5_reach_mjlab.py`
+- `mjlab` 推理与可视化入口。
+- 支持自动定位最近一次训练的 checkpoint。
+
 ## Warp Pipeline
 
 `warp_ur5_config.py`
@@ -94,7 +114,30 @@ assets/robotiq_cxy/meshes/
 
 ## Installation
 
-推荐 Python `3.10` 或 `3.11`。
+推荐 Python `3.10` 到 `3.12`。
+
+### MJLAB 推荐安装方式
+
+`mjlab` 官方当前更推荐使用 `uv` 管理环境与依赖：
+
+```bash
+uv venv --python 3.12
+source .venv/bin/activate
+uv sync --extra cu128
+```
+
+如果只是 CPU 环境，可以改成：
+
+```bash
+uv sync --extra cpu
+```
+
+更完整说明见：
+- [docs/MJLAB_SETUP.md](/home/zzyfan/mujoco_ur5_rl/docs/MJLAB_SETUP.md)
+
+### pip 兼容安装方式
+
+如果你希望继续沿用 `pip` 工作流，可以安装统一依赖文件：
 
 ```bash
 python -m venv .venv
@@ -155,6 +198,35 @@ python train_ur5_reach.py \
   --algo ppo \
   --run-name ur5_ppo_main \
   --total-timesteps 1500000
+```
+
+## MJLAB Training
+
+```bash
+uv run train-ur5-reach-mjlab \
+  --run-name ur5_reach_mjlab \
+  --num-envs 1024
+```
+
+也可以直接运行 Python 脚本：
+
+```bash
+python train_ur5_reach_mjlab.py \
+  --run-name ur5_reach_mjlab \
+  --num-envs 1024
+```
+
+## MJLAB Play
+
+```bash
+uv run play-ur5-reach-mjlab
+```
+
+若要手动指定 checkpoint：
+
+```bash
+uv run play-ur5-reach-mjlab \
+  --checkpoint-file logs/rsl_rl/ur5_reach_mjlab/你的运行目录/model_4000.pt
 ```
 
 ## Warp Training

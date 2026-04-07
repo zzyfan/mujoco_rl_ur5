@@ -1,9 +1,25 @@
+# 统一依赖文件：
+# - 保留原来的 Gymnasium + SB3 主线
+# - 同时覆盖新加入的 mjlab 训练线
+#
+# 若你准备按 mjlab 官方推荐方式装环境，请优先使用：
+#   uv sync --extra cu128
+#
+# 这里的 requirements.txt 主要作为 pip 兼容入口，方便已有工作流继续复用。
+
+--extra-index-url https://pypi.nvidia.com/
+--extra-index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://py.mujoco.org
+
 gymnasium>=0.29
-mujoco>=3.1
-stable-baselines3[extra]>=2.3
-torch>=2.2
 numpy>=1.24
 pandas>=2.0
 matplotlib>=3.8
 jupyterlab>=4.0
 ipykernel>=6.29
+stable-baselines3[extra]>=2.3
+torch>=2.7.0
+mujoco>=3.6.0
+warp-lang>=1.12.0; sys_platform != "darwin"
+mujoco-warp @ git+https://github.com/google-deepmind/mujoco_warp@875c4caf06d71b12b2036c327e7a07ce08a78b9a
+mjlab==1.2.0

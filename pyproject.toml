@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mujoco-ur5-rl"
+version = "0.2.0"
+description = "UR5 reach reinforcement learning project with SB3, Warp, and mjlab pipelines."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+  "gymnasium>=0.29",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "matplotlib>=3.8",
+  "jupyterlab>=4.0",
+  "ipykernel>=6.29",
+  "stable-baselines3[extra]>=2.3",
+  "mujoco>=3.6.0",
+  "warp-lang>=1.12.0; sys_platform != 'darwin'",
+  "mujoco-warp>=3.6.0",
+  "mjlab==1.2.0",
+]
+
+[project.optional-dependencies]
+cu128 = ["torch>=2.7.0"]
+cpu = ["torch>=2.7.0"]
+
+[project.scripts]
+train-ur5-reach-mjlab = "train_ur5_reach_mjlab:main"
+play-ur5-reach-mjlab = "play_ur5_reach_mjlab:main"
+
+[tool.setuptools]
+py-modules = [
+  "mjlab_ur5_task",
+  "play_ur5_reach_mjlab",
+  "train_ur5_reach_mjlab",
+  "train_ur5_reach",
+  "train_ur5_reach_warp",
+  "test_ur5_reach_warp",
+  "ur5_reach_config",
+  "ur5_reach_env",
+  "warp_ur5_config",
+  "warp_ur5_env",
+  "warp_ur5_runtime",
+]
+
+[tool.uv]
+conflicts = [
+  [{ extra = "cu128" }, { extra = "cpu" }],
+]
+override-dependencies = ["mujoco>=3.6.0.dev0"]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com/"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "mujoco"
+url = "https://py.mujoco.org"
+explicit = true
+
+[tool.uv.sources]
+warp-lang = { index = "nvidia", marker = "sys_platform != 'darwin'" }
+torch = [
+  { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform != 'darwin'" },
+  { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform != 'darwin'" },
+]
+mujoco = { index = "mujoco" }
+mujoco-warp = { git = "https://github.com/google-deepmind/mujoco_warp", rev = "875c4caf06d71b12b2036c327e7a07ce08a78b9a" }
