@@ -112,6 +112,13 @@ _ARM_ACTUATOR_NAMES = (
 _GRIPPER_ACTUATOR_NAMES = ("close_1", "close_2")
 _GRAVITY_ACTUATOR_NAMES = ("gravity_1", "gravity_2", "gravity_3", "gravity_4")
 _WARP_IMPL = "warp"
+_OBSERVATION_SCHEMA = (
+    ("obs[00:03]", "relative_position_xyz", "目标位置减末端位置，单位米；依次对应 x/y/z 三个方向。"),
+    ("obs[03:09]", "joint_positions", "UR5 六个关节当前角度，单位弧度；顺序是 joint1 到 joint6。"),
+    ("obs[09:15]", "joint_velocities", "UR5 六个关节当前角速度，单位弧度每秒；顺序是 joint1 到 joint6。"),
+    ("obs[15:21]", "previous_torque", "上一决策步实际施加到六个关节的力矩，单位牛米；顺序是 joint1 到 joint6。"),
+    ("obs[21:24]", "ee_velocity_xyz", "末端执行器当前线速度，单位米每秒；依次对应 x/y/z 三个方向。"),
+)
 
 
 def default_config() -> config_dict.ConfigDict:
@@ -161,6 +168,16 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         # 关键一步：把 MuJoCo host 模型转换成 MJX / Warp 可执行模型。
         self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)  # 转成 Warp 可执行模型
         self._post_init()
+
+    @classmethod
+    def observation_schema(cls, goal_observation: bool = False) -> tuple[tuple[str, str, str], ...]:
+        # Warp 线和主线基础观测一致；goal_observation 打开时再额外暴露目标相关切片。
+        if goal_observation:
+            return _OBSERVATION_SCHEMA + (
+                ("obs[24:27]", "achieved_goal_xyz", "当前末端执行器位置，单位米；依次对应 x/y/z 三个方向。"),
+                ("obs[27:30]", "desired_goal_xyz", "当前目标点位置，单位米；依次对应 x/y/z 三个方向。"),
+            )
+        return _OBSERVATION_SCHEMA
 
     def _post_init(self) -> None:
         # 解析一次性索引和常量缓存。
@@ -223,12 +240,12 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         return mask
 
     def _build_ignored_contact_geom_mask(self) -> np.ndarray:
-        # 构造被忽略的 geom mask，例如目标球和装饰灯光。
+        # 构造被忽略的 geom mask，例如装饰灯光。
         mask = np.zeros(self.mj_model.ngeom, dtype=bool)
         for geom_id in range(self.mj_model.ngeom):
             # 这里按 geom 名字过滤，是因为这些物体本身只用于观察，不该被当成训练失败碰撞。
             name = self.mj_model.geom(geom_id).name or ""
-            if name.startswith("target_") or name.startswith("light_"):
+            if name.startswith("light_"):
                 mask[geom_id] = True
         return mask
 
@@ -453,7 +470,7 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         raw_contacts = jp.sum(active_mask).astype(jp.float32)
 
         # 下面这一段会把所有活跃接触进一步过滤成“真正危险的碰撞”：
-        # 1. 目标球和灯光忽略
+        # 1. 纯装饰 geom 忽略
         # 2. 机器人内部自碰撞忽略
         # 3. 只保留“机器人 vs 外部物体”的碰撞
         geom1 = jp.asarray(contact.geom1)
@@ -500,12 +517,18 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         obs = self._get_obs(data, self._zero_action, self._zero_ee_vel)
         metrics = {
             "distance": distance,
+            "relative_distance": distance,
             "ee_speed": jp.asarray(0.0, dtype=jp.float32),
+            "relative_speed": jp.asarray(0.0, dtype=jp.float32),
             "success": jp.asarray(0.0, dtype=jp.float32),
             "collision": jp.asarray(0.0, dtype=jp.float32),
             "runaway": jp.asarray(0.0, dtype=jp.float32),
             "timeout": jp.asarray(0.0, dtype=jp.float32),
             "raw_collision_contacts": jp.asarray(0.0, dtype=jp.float32),
+            "episode_return": jp.asarray(0.0, dtype=jp.float32),
+            "episode_collision_count": jp.asarray(0.0, dtype=jp.float32),
+            "episode_success_count": jp.asarray(0.0, dtype=jp.float32),
+            "lifetime_success_count": jp.asarray(0.0, dtype=jp.float32),
         }
         # `info` 保存那些下一步还要继续用的状态缓存。
         # 这些量不会直接喂给策略，但会参与 reward、动作平滑和阶段奖励。
@@ -521,6 +544,10 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
             "task_step": jp.asarray(0, dtype=jp.int32),
             "success_threshold": self._current_success_threshold(),
             "runaway_seen": jp.asarray(0.0, dtype=jp.float32),
+            "episode_return": jp.asarray(0.0, dtype=jp.float32),
+            "episode_collision_count": jp.asarray(0.0, dtype=jp.float32),
+            "episode_success_count": jp.asarray(0.0, dtype=jp.float32),
+            "lifetime_success_count": jp.asarray(0.0, dtype=jp.float32),
         }
         return mjx_env.State(data=data, obs=obs, reward=jp.asarray(0.0, dtype=jp.float32), done=jp.asarray(0.0, dtype=jp.float32), metrics=metrics, info=info)
 
@@ -643,16 +670,27 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         if str(self._config.reward_mode).lower() == "sparse":
             reward = self._compute_goal_reward(ee_pos, self._get_target_pos(data), current_success_threshold)
 
+        episode_return = state.info["episode_return"] + reward
+        episode_collision_count = state.info["episode_collision_count"] + collision.astype(jp.float32)
+        episode_success_count = state.info["episode_success_count"] + success.astype(jp.float32)
+        lifetime_success_count = state.info["lifetime_success_count"] + success.astype(jp.float32)
+
         # `metrics` 用来给训练器和日志系统看，强调“当前结果是什么”。
         metrics = {
             **state.metrics,
             "distance": distance,
+            "relative_distance": distance,
             "ee_speed": ee_speed,
+            "relative_speed": ee_speed,
             "success": success.astype(jp.float32),
             "collision": collision.astype(jp.float32),
             "runaway": runaway_seen.astype(jp.float32),
             "timeout": timeout.astype(jp.float32),
             "raw_collision_contacts": raw_collision_contacts,
+            "episode_return": episode_return.astype(jp.float32),
+            "episode_collision_count": episode_collision_count.astype(jp.float32),
+            "episode_success_count": episode_success_count.astype(jp.float32),
+            "lifetime_success_count": lifetime_success_count.astype(jp.float32),
         }
         # `info` 用来给下一步计算继续用，强调“下一步还要带着什么状态往前走”。
         info = {
@@ -668,6 +706,10 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
             "task_step": task_step,
             "success_threshold": current_success_threshold,
             "runaway_seen": runaway_seen.astype(jp.float32),
+            "episode_return": episode_return.astype(jp.float32),
+            "episode_collision_count": episode_collision_count.astype(jp.float32),
+            "episode_success_count": episode_success_count.astype(jp.float32),
+            "lifetime_success_count": lifetime_success_count.astype(jp.float32),
         }
         return mjx_env.State(data=data, obs=obs, reward=reward, done=done, metrics=metrics, info=info)
 

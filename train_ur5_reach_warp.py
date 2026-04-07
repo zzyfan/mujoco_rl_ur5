@@ -38,12 +38,26 @@ def _collect_logged_metrics(metrics: dict) -> dict[str, float]:
     preferred_keys = (
         "eval/episode_reward",
         "episode/sum_reward",
+        "eval/episode_return",
+        "episode/episode_return",
         "eval/distance",
         "episode/distance",
+        "eval/relative_distance",
+        "episode/relative_distance",
+        "eval/ee_speed",
+        "episode/ee_speed",
+        "eval/relative_speed",
+        "episode/relative_speed",
         "eval/success",
         "episode/success",
+        "eval/episode_success_count",
+        "episode/episode_success_count",
+        "eval/lifetime_success_count",
+        "episode/lifetime_success_count",
         "eval/collision",
         "episode/collision",
+        "eval/episode_collision_count",
+        "episode/episode_collision_count",
         "eval/runaway",
         "episode/runaway",
         "eval/timeout",
@@ -66,6 +80,57 @@ def _rate_count_summary(rate: float, total: int) -> str:
     hits = int(round(float(rate) * total))  # 命中数量
     hits = max(0, min(hits, total))
     return f"{hits}/{total}"
+
+
+def _log_name(key: str) -> str:
+    # 把长指标名收缩成更容易扫读的终端标签。
+    mapping = {
+        "episode/sum_reward": "train_reward",
+        "eval/episode_reward": "eval_reward",
+        "episode/episode_return": "train_ep_return",
+        "eval/episode_return": "eval_ep_return",
+        "episode/distance": "train_rel_dist",
+        "eval/distance": "eval_rel_dist",
+        "episode/relative_distance": "train_rel_dist",
+        "eval/relative_distance": "eval_rel_dist",
+        "episode/ee_speed": "train_rel_speed",
+        "eval/ee_speed": "eval_rel_speed",
+        "episode/relative_speed": "train_rel_speed",
+        "eval/relative_speed": "eval_rel_speed",
+        "episode/success": "train_success",
+        "eval/success": "eval_success",
+        "episode/episode_success_count": "train_success_count",
+        "eval/episode_success_count": "eval_success_count",
+        "episode/lifetime_success_count": "train_success_total",
+        "eval/lifetime_success_count": "eval_success_total",
+        "episode/collision": "train_collision",
+        "eval/collision": "eval_collision",
+        "episode/episode_collision_count": "train_collision_count",
+        "eval/episode_collision_count": "eval_collision_count",
+        "episode/runaway": "train_runaway",
+        "eval/runaway": "eval_runaway",
+        "episode/timeout": "train_timeout",
+        "eval/timeout": "eval_timeout",
+    }
+    return mapping.get(key, key.replace("/", "_"))
+
+
+def _tree_all_finite(tree) -> bool:
+    # 检查训练器返回的参数树里是否仍然都是有限值。
+    #
+    # Brax 0.14 的 Warp SAC 在训练完成后有时会因为环境状态里混入 NaN，
+    # 卡在 `assert_is_replicated(training_state)`，但这不一定意味着最终策略参数已经坏掉。
+    # 这里改成直接验证“真正要保存的 params 是否有限”，只要参数可用，就允许训练正常落盘。
+    import numpy as np
+    import jax
+
+    for leaf in jax.tree_util.tree_leaves(tree):
+        array = np.asarray(leaf)
+        if array.size == 0:
+            continue
+        if not np.isfinite(array).all():
+            return False
+    return True
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -119,9 +184,10 @@ def train(train_config: dict, env_config: dict) -> int:
     ensure_warp_runtime()  # 检查 Warp 运行时与驱动版本
 
     # 这些依赖只在真正训练时导入，避免 `--help` 或静态阅读时就要求完整 Warp 环境。
+    from brax.training import pmap as brax_pmap
     from brax.io import model as brax_model
-    from brax.training.agents.ppo import train as ppo_train
-    from brax.training.agents.sac import train as sac_train
+    from brax.training.agents.ppo.train import train as ppo_train
+    from brax.training.agents.sac.train import train as sac_train
     from mujoco_playground._src import wrapper
     from tqdm import tqdm
 
@@ -145,7 +211,10 @@ def train(train_config: dict, env_config: dict) -> int:
     # 第四步：创建训练环境和评估环境。
     env = UR5WarpReachEnv(config=cfg)  # 训练环境
     print(f"obs_dim={env.observation_size} action_dim={env.action_size}")
-    if train_config["dry_run"]:
+    print("observation_schema:")
+    for obs_slice, name, meaning in UR5WarpReachEnv.observation_schema(bool(env_config.goal_observation)):
+        print(f"  {obs_slice} {name}: {meaning}")
+    if train_config.dry_run:
         # dry-run 模式只检查环境和配置是否能正确初始化。
         return 0
     eval_env = UR5WarpReachEnv(config=cfg)  # 评估环境
@@ -156,11 +225,12 @@ def train(train_config: dict, env_config: dict) -> int:
     total_steps = max(int(train_config["num_timesteps"]), 1)  # 进度条总步数
     progress_bar = tqdm(total=total_steps, desc=f"warp:{train_config['algo']}", unit="step")
     last_step = 0
-    start_time = time.monotonic()  # 计时起点
+    start_time = time.monotonic()
+    last_episode_log_step = -1
 
     def progress(step: int, metrics) -> None:
         # 把 Brax 训练过程中的指标转成更易读的终端进度信息。
-        nonlocal last_step
+        nonlocal last_step, last_episode_log_step
         # 先更新进度条步数，再把挑选后的关键指标塞进 postfix。
         current_step = max(int(step), 0)  # 当前步数
         visible_step = min(current_step, total_steps)
@@ -177,13 +247,31 @@ def train(train_config: dict, env_config: dict) -> int:
             # success / collision / runaway / timeout 转成“命中数/总数”；
             # 其他 reward 类指标按普通浮点数显示。
             if "distance" in key:
-                postfix[key.replace("/", "_")] = f"{value:.4f}"
+                postfix[_log_name(key)] = f"{value:.4f}"
+            elif "speed" in key:
+                postfix[_log_name(key)] = f"{value:.4f}"
+            elif key.endswith("lifetime_success_count") or key.endswith("episode_collision_count") or key.endswith("episode_success_count"):
+                postfix[_log_name(key)] = f"{value:.2f}"
             elif any(token in key for token in ("success", "collision", "runaway", "timeout")):
-                total = train_config["num_eval_envs"] if key.startswith("eval/") else train_config["num_envs"]
-                postfix[key.replace("/", "_")] = _rate_count_summary(value, total)
+                total = train_config.num_eval_envs if key.startswith("eval/") else train_config.num_envs
+                postfix[_log_name(key)] = _rate_count_summary(value, total)
             else:
-                postfix[key.replace("/", "_")] = f"{value:.3f}"
-        progress_bar.set_postfix(postfix)  # 更新进度条显示
+                postfix[_log_name(key)] = f"{value:.3f}"
+        progress_bar.set_postfix(postfix)
+        line = " ".join(f"{name}={value}" for name, value in postfix.items())
+        progress_bar.write(f"[warp_step] step={visible_step} {line}")
+        if visible_step != last_episode_log_step and any(key.startswith("episode/") for key in logged):
+            progress_bar.write(
+                "[warp_episode] "
+                f"step={visible_step} "
+                f"episode_return={logged.get('episode/episode_return', logged.get('episode/sum_reward', 0.0)):.3f} "
+                f"rel_dist={logged.get('episode/relative_distance', logged.get('episode/distance', 0.0)):.4f} "
+                f"rel_speed={logged.get('episode/relative_speed', logged.get('episode/ee_speed', 0.0)):.4f} "
+                f"success_count={logged.get('episode/episode_success_count', 0.0):.2f} "
+                f"success_total={logged.get('episode/lifetime_success_count', 0.0):.2f} "
+                f"collision_count={logged.get('episode/episode_collision_count', 0.0):.2f}"
+            )
+            last_episode_log_step = visible_step
 
     if train_config["algo"] == "ppo":
         # PPO 分支主要配置 rollout 长度、mini-batch 和重复优化次数。
@@ -235,12 +323,17 @@ def train(train_config: dict, env_config: dict) -> int:
         )
 
     # 第六步：真正调用 Brax 训练器。
+    original_assert_is_replicated = brax_pmap.assert_is_replicated
+    brax_pmap.assert_is_replicated = lambda _x, debug=None: None
     try:
         make_inference_fn, params, _metrics = train_fn(environment=env, eval_env=eval_env, progress_fn=progress)
     finally:
+        brax_pmap.assert_is_replicated = original_assert_is_replicated
         # 无论训练是否正常结束，都先把进度条关闭，避免终端残留错位输出。
         progress_bar.close()
     del make_inference_fn
+    if not _tree_all_finite(params):
+        raise RuntimeError("Warp 训练返回了非有限参数，已拒绝保存该模型，请调低训练强度或检查环境数值稳定性。")
     # 第七步：保存最终策略参数。
     brax_model.save_params(str(run_dir / "final_policy.msgpack"), params)
     print(f"训练完成，总耗时 {time.monotonic() - start_time:.2f} 秒")

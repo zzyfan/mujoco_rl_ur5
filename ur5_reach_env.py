@@ -26,6 +26,16 @@ try:
 except Exception:
     mj_viewer = None
 
+from ur5_reach_config import UR5ReachEnvConfig, project_root
+
+OBSERVATION_SCHEMA = (
+    ("obs[00:03]", "relative_position_xyz", "目标位置减末端位置，单位米；依次对应 x/y/z 三个方向。"),
+    ("obs[03:09]", "joint_positions", "UR5 六个关节当前角度，单位弧度；顺序是 joint1 到 joint6。"),
+    ("obs[09:15]", "joint_velocities", "UR5 六个关节当前角速度，单位弧度每秒；顺序是 joint1 到 joint6。"),
+    ("obs[15:21]", "previous_torque", "上一决策步实际施加到六个关节的力矩，单位牛米；顺序是 joint1 到 joint6。"),
+    ("obs[21:24]", "ee_velocity_xyz", "末端执行器当前线速度，单位米每秒；依次对应 x/y/z 三个方向。"),
+)
+
 
 class UR5ReachEnv(gym.Env):
     # UR5 末端跟踪环境（MuJoCo）。
@@ -147,11 +157,79 @@ class UR5ReachEnv(gym.Env):
         ]
 
         # Gymnasium 需要显式声明动作空间和观测空间。
-        # 动作空间：机械臂 6 关节力矩，范围由 TORQUE_LOW/HIGH 给出。
-        self.action_space = spaces.Box(
-            low=float(self.TORQUE_LOW),
-            high=float(self.TORQUE_HIGH),
-            shape=(len(self.arm_actuator_ids),),
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(24,), dtype=np.float32)
+
+        # 下面这组成员变量用于跨 step 保存历史信息，参与动作平滑、速度估计和奖励计算。
+        self.episode_index = 0
+        self.step_count = 0
+        self.current_stage = "fixed"
+        self.target_position = np.zeros(3, dtype=np.float32)
+        self.previous_action = np.zeros(6, dtype=np.float32)
+        self.previous_control = np.zeros(6, dtype=np.float32)
+        self.previous_joint_velocities = np.zeros(6, dtype=np.float32)
+        self.previous_ee_position = np.zeros(3, dtype=np.float32)
+        self.current_ee_velocity = np.zeros(3, dtype=np.float32)
+        self.previous_distance: float | None = None
+        self.best_distance: float | None = None
+        self.phase_rewards_given: set[float] = set()
+        self.last_reward_terms: dict[str, float] = {}
+        self.episode_return = 0.0
+        self.episode_collision_count = 0
+        self.episode_success_count = 0
+        self.lifetime_success_count = 0
+
+    @classmethod
+    def observation_schema(cls) -> tuple[tuple[str, str, str], ...]:
+        # 返回观测向量的切片定义，便于训练脚本把每一段的物理含义直接打印出来。
+        return OBSERVATION_SCHEMA
+
+    def _collect_descendant_body_ids(self, root_body_id: int) -> set[int]:
+        # 收集机器人根节点下的所有 body id，用来过滤机器人内部自碰撞。
+        result: set[int] = set()
+        queue = [int(root_body_id)]
+        while queue:
+            # 这里做的是一个简单的广度/深度混合遍历：
+            # 从根 body 出发，一层层找到所有子 body。
+            current = queue.pop()
+            result.add(current)
+            for body_id in range(self.model.nbody):
+                if int(self.model.body_parentid[body_id]) == current and body_id != current:
+                    queue.append(body_id)
+        return result
+
+    def _collect_ignored_contact_geom_ids(self) -> set[int]:
+        # 收集在碰撞判定中需要忽略的几何体，例如装饰灯光。
+        ignored: set[int] = set()
+        for geom_id in range(self.model.ngeom):
+            # 这些 geom 主要用于可视化提示，不应该参与失败碰撞判定。
+            name = self.model.geom(geom_id).name or ""
+            if name.startswith("light_"):
+                ignored.add(int(geom_id))
+        return ignored
+
+    def _set_home_pose(self) -> None:
+        # 把机械臂 reset 到一个稳定且能覆盖工作空间的初始姿态。
+        #
+        # 做法是：
+        # 1. 先恢复 MuJoCo 初始 qpos/qvel 模板
+        # 2. 再覆盖机械臂 6 个关节
+        # 3. 最后把夹爪和重力补偿控制量写进去
+        self.data.qpos[:] = self.home_qpos
+        self.data.qvel[:] = self.home_qvel
+
+        q1 = float(self.config.home_joint1)
+        q2 = float(self.config.home_joint2)
+        q3 = float(self.config.home_joint3)
+        arm_pose = np.array(
+            [
+                q1,
+                q2,
+                q3,
+                1.5 * math.pi - q2 - q3,
+                1.5 * math.pi,
+                1.25 * math.pi + q1,
+            ],
             dtype=np.float32,
         )
 
@@ -270,6 +348,184 @@ class UR5ReachEnv(gym.Env):
             ],
             dtype=np.float32,
         )
+        return observation.astype(np.float32)
+
+    def _compute_pd_torque(self, action: np.ndarray) -> np.ndarray:
+        # 把归一化的关节增量动作通过一个小型 PD 控制器转换成力矩。
+        #
+        # 做法是：
+        # 1. 读出当前关节角和关节速度
+        # 2. 用动作生成目标关节角
+        # 3. 通过 `kp * 位置误差 - kd * 速度` 生成力矩
+        current_positions = self.data.qpos[self.arm_qpos_adr].astype(np.float32).copy()
+        current_velocities = self.data.qvel[self.arm_qvel_adr].astype(np.float32).copy()
+        desired_positions = np.clip(
+            current_positions + action * float(self.config.joint_delta_scale),
+            self.arm_joint_low,
+            self.arm_joint_high,
+        )
+        torques = (
+            float(self.config.position_kp) * (desired_positions - current_positions)
+            - float(self.config.position_kd) * current_velocities
+        )
+        return np.clip(torques, float(self.config.torque_low), float(self.config.torque_high)).astype(np.float32)
+
+    def _action_to_control(self, action: np.ndarray) -> np.ndarray:
+        # 把策略动作映射成真实执行器控制量。
+        #
+        # 两种控制方式：
+        # - `torque`：直接把动作缩放成力矩。
+        # - `joint_delta`：先解释成关节目标增量，再通过 PD 控制器转成力矩。
+        # 第一步：把策略动作裁剪到动作空间范围内。
+        normalized_action = np.clip(action, -1.0, 1.0).astype(np.float32)
+        if self.config.control_mode == "torque":
+            # torque 模式：直接线性映射到真实力矩区间。
+            torque_center = 0.5 * (float(self.config.torque_high) + float(self.config.torque_low))
+            torque_scale = 0.5 * (float(self.config.torque_high) - float(self.config.torque_low))
+            raw_control = torque_center + torque_scale * normalized_action
+        else:
+            # joint_delta 模式：先转目标关节角，再通过 PD 算法转成力矩。
+            raw_control = self._compute_pd_torque(normalized_action)
+        # 平滑项的作用是抑制动作抖动，减少训练初期的高频力矩震荡。
+        smoothed = (
+            float(self.config.action_smoothing_alpha) * self.previous_control
+            + (1.0 - float(self.config.action_smoothing_alpha)) * raw_control
+        )
+        smoothed = np.clip(smoothed, float(self.config.torque_low), float(self.config.torque_high)).astype(np.float32)
+        self.previous_control = smoothed
+        return smoothed
+
+    def _has_external_collision(self) -> bool:
+        # 把机器人与外部环境的碰撞视为失败，但忽略机器人自碰撞和纯装饰 geom。
+        geom_body_ids = self.model.geom_bodyid
+        for contact_index in range(self.data.ncon):
+            # 逐条读取当前活跃 contact，再按名字和 body 归属过滤掉不危险的碰撞。
+            contact = self.data.contact[contact_index]
+            geom1 = int(contact.geom1)
+            geom2 = int(contact.geom2)
+            if geom1 in self.ignored_contact_geom_ids or geom2 in self.ignored_contact_geom_ids:
+                continue
+            body1 = int(geom_body_ids[geom1])
+            body2 = int(geom_body_ids[geom2])
+            body1_is_robot = body1 in self.robot_body_ids
+            body2_is_robot = body2 in self.robot_body_ids
+            if body1_is_robot and body2_is_robot:
+                continue
+            if body1_is_robot or body2_is_robot:
+                return True
+        return False
+
+    def _update_ee_velocity(self, ee_position: np.ndarray) -> None:
+        # 用有限差分估计末端执行器线速度。
+        dt = max(float(self.model.opt.timestep) * int(self.config.frame_skip), 1e-6)
+        self.current_ee_velocity = ((ee_position - self.previous_ee_position) / dt).astype(np.float32)
+        self.previous_ee_position = ee_position.astype(np.float32)
+
+    def _compute_reward(
+        self,
+        action: np.ndarray,
+        previous_action: np.ndarray,
+        distance: float,
+        collision: bool,
+        ee_speed: float,
+        remaining_steps: int,
+    ) -> tuple[float, bool, bool, dict[str, float], str]:
+        # 计算 reward，并把各个奖励项拆开返回。
+        #
+        # 这里同时返回 `reward_terms`，目的是让训练调试和 notebook 学习时可以直接看到：
+        # - 每一项奖励是怎么来的
+        # - 哪个终止条件先触发
+        # - 当前策略是卡在“碰撞、超时、跑飞”还是“快要成功”
+        terminated = False
+        truncated = False
+        done_reason = "running"
+
+        # 先算和上一时刻相比是否更接近目标，并保留“历史最优距离”和“上一时刻距离”两种基准。
+        previous_distance = float(self.previous_distance) if self.previous_distance is not None else float(distance)
+        if self.best_distance is None:
+            self.best_distance = float(distance)
+        best_distance_before = float(self.best_distance)
+
+        # 奖励拆分成若干明确的物理含义项，便于调参和解释。
+        reward_terms = {
+            "step_penalty": -float(self.config.step_penalty),
+            "distance_penalty": -float(self.config.distance_weight) * float(np.sqrt(distance + 1e-8)),
+            "progress_reward": 0.0,
+            "regress_penalty": 0.0,
+            "phase_reward": 0.0,
+            "speed_penalty": 0.0,
+            "direction_reward": 0.0,
+            "action_penalty": -float(self.config.action_l2_penalty) * float(np.mean(np.square(action))),
+            "smoothness_penalty": -float(self.config.action_smoothness_penalty) * float(np.mean(np.square(action - previous_action))),
+            "joint_velocity_penalty": 0.0,
+            "collision_penalty": 0.0,
+            "success_bonus": 0.0,
+            "runaway_penalty": 0.0,
+        }
+
+        # 奖励主体和 zero-arm 一样，优先看是否刷新历史最优距离，其次再看是否比上一时刻更远。
+        if distance < best_distance_before:
+            reward_terms["progress_reward"] = float(self.config.progress_reward_gain) * (best_distance_before - float(distance))
+            self.best_distance = float(distance)
+        elif distance > previous_distance:
+            reward_terms["regress_penalty"] = -float(self.config.regress_penalty_gain) * (float(distance) - previous_distance)
+
+        # 阶段奖励只在第一次穿过阈值时触发一次，鼓励先学会逐步逼近目标。
+        for threshold, phase_reward in zip(self.config.phase_thresholds, self.config.phase_rewards):
+            if distance < float(threshold) and float(threshold) not in self.phase_rewards_given:
+                reward_terms["phase_reward"] += float(phase_reward)
+                self.phase_rewards_given.add(float(threshold))
+
+        # 速度太快时给予固定惩罚，抑制冲向目标时的剧烈摆动。
+        if ee_speed > float(self.config.speed_penalty_threshold):
+            reward_terms["speed_penalty"] = -float(self.config.speed_penalty_value)
+
+        # 方向奖励需要当前末端速度和“朝向目标的方向”同时存在。
+        to_target = self.target_position - self._finger_center()
+        to_target_norm = float(np.linalg.norm(to_target))
+        if ee_speed > 1e-6 and to_target_norm > 1e-6:
+            movement_direction = self.current_ee_velocity / (ee_speed + 1e-6)
+            target_direction = to_target / (to_target_norm + 1e-6)
+            direction_cos = max(float(np.dot(movement_direction, target_direction)), 0.0)
+            reward_terms["direction_reward"] = float(self.config.direction_reward_gain) * (direction_cos**2)
+
+        # 关节速度变化惩罚使用“当前关节速度 - 上一时刻关节速度”的绝对值和。
+        joint_velocity_change = np.abs(self.data.qvel[self.arm_qvel_adr] - self.previous_joint_velocities)
+        reward_terms["joint_velocity_penalty"] = -float(self.config.joint_velocity_penalty) * float(np.sum(joint_velocity_change))
+
+        # 碰撞、成功、跑飞和超时共同决定回合是否结束。
+        if collision:
+            reward_terms["collision_penalty"] = -float(self.config.collision_penalty)
+            reward_terms["collision_penalty"] += -float(self.config.step_penalty) * float(max(remaining_steps, 0))
+            terminated = True
+            done_reason = "collision"
+
+        success = distance <= self._success_threshold()
+        if success:
+            reward_terms["success_bonus"] = float(self.config.success_bonus)
+            reward_terms["success_bonus"] += float(self.config.success_remaining_step_gain) * float(max(remaining_steps, 0))
+            if ee_speed < 0.01:
+                reward_terms["success_bonus"] += float(self.config.success_speed_bonus_very_slow)
+            elif ee_speed < 0.05:
+                reward_terms["success_bonus"] += float(self.config.success_speed_bonus_slow)
+            elif ee_speed < 0.10:
+                reward_terms["success_bonus"] += float(self.config.success_speed_bonus_medium)
+            terminated = True
+            done_reason = "success"
+
+        if distance > float(self.config.runaway_distance_threshold):
+            reward_terms["runaway_penalty"] = -float(self.config.runaway_penalty)
+            terminated = True
+            done_reason = "runaway"
+
+        if self.step_count >= int(self.config.episode_length):
+            truncated = True
+            done_reason = "timeout"
+
+        self.previous_distance = float(distance)
+        reward = float(sum(reward_terms.values()))
+        self.last_reward_terms = reward_terms
+        return reward, terminated, truncated, reward_terms, done_reason
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         # 重置环境并返回首个观测。
@@ -281,10 +537,22 @@ class UR5ReachEnv(gym.Env):
         self.data.qpos[self.arm_qpos_adr] = self._home_joint_positions()  # 设置机械臂初始姿态
         self.data.qvel[self.arm_qvel_adr] = 0.0  # 清空机械臂关节速度
 
-        # 采样目标点并写入物理状态。
-        self.target_pos = self._sample_target()
-        self._set_target_position(self.target_pos)  # 把目标球移动到采样位置
-        mujoco.mj_forward(self.model, self.data)  # 让初始姿态和目标生效
+        # 第三步：初始化和历史相关的缓存量。
+        ee_position = self._finger_center()
+        self.previous_action[:] = 0.0
+        self.previous_control[:] = 0.0
+        self.previous_joint_velocities[:] = 0.0
+        self.previous_ee_position = ee_position.astype(np.float32)
+        self.current_ee_velocity[:] = 0.0
+        self.previous_distance = float(np.linalg.norm(self.target_position - ee_position))
+        self.best_distance = self.previous_distance
+        self.phase_rewards_given = set()
+        self.step_count = 0
+        self.last_reward_terms = {}
+        self.episode_return = 0.0
+        self.episode_collision_count = 0
+        self.episode_success_count = 0
+        current_episode_index = self.episode_index + 1
 
         # 重置控制量（力矩 / 夹爪 / 重力补偿）
         self.data.ctrl[:] = 0.0  # 清空所有执行器控制量
@@ -302,12 +570,21 @@ class UR5ReachEnv(gym.Env):
         # 获取初始状态
         state = self._get_state()  # 组装观测向量
         info = {
-            "distance": float(np.linalg.norm(self.target_pos - self.data.xpos[self.ee_body_id])),  # 相对距离
-            "ee_speed": 0.0,  # 末端速度（初始为 0）
-            "success": False,  # 是否成功命中目标
-            "collision": False,  # 是否发生碰撞
+            "episode_index": current_episode_index,
+            "target_position": self.target_position.copy(),
+            "curriculum_stage": self.current_stage,
+            "success_threshold": self._success_threshold(),
+            "distance": float(self.previous_distance),
+            "relative_distance": float(self.previous_distance),
+            "ee_speed": 0.0,
+            "relative_speed": 0.0,
+            "episode_return": 0.0,
+            "episode_collision_count": 0,
+            "episode_success_count": 0,
+            "lifetime_success_count": int(self.lifetime_success_count),
         }
-        return state, info
+        self.episode_index = current_episode_index
+        return observation, info
 
     def step(self, action: np.ndarray):
         # 推进一步物理并计算回报。
@@ -413,11 +690,66 @@ class UR5ReachEnv(gym.Env):
 
         truncated = self.step_count >= int(self.EPISODE_LENGTH)  # 超过最大步数即截断
 
+        # 第四步：根据新状态计算速度、距离、碰撞和 reward。
+        self.step_count += 1
+        ee_position = self._finger_center()
+        self._update_ee_velocity(ee_position)
+        distance = float(np.linalg.norm(self.target_position - ee_position))
+        ee_speed = float(np.linalg.norm(self.current_ee_velocity))
+        collision = self._has_external_collision()
+        remaining_steps = int(self.config.episode_length) - self.step_count
+        reward, terminated, truncated, reward_terms, done_reason = self._compute_reward(
+            normalized_action,
+            previous_action,
+            distance,
+            collision,
+            ee_speed,
+            remaining_steps,
+        )
+        self.episode_return += float(reward)
+        if collision:
+            self.episode_collision_count += 1
+        if done_reason == "success":
+            self.episode_success_count += 1
+            self.lifetime_success_count += 1
+        # 第五步：更新历史动作，构造下一步需要的观测和 info。
+        self.previous_action = np.clip(normalized_action, -1.0, 1.0).astype(np.float32)
+        observation = self._compose_observation()
+        episode_summary = None
+        if terminated or truncated:
+            episode_summary = {
+                "episode_index": int(self.episode_index),
+                "episode_steps": int(self.step_count),
+                "episode_return": float(self.episode_return),
+                "episode_collision_count": int(self.episode_collision_count),
+                "episode_success_count": int(self.episode_success_count),
+                "lifetime_success_count": int(self.lifetime_success_count),
+                "final_distance": float(distance),
+                "min_distance": float(self.best_distance if self.best_distance is not None else distance),
+                "final_speed": float(ee_speed),
+                "curriculum_stage": self.current_stage,
+                "done_reason": done_reason,
+                "reward_terms": dict(reward_terms),
+            }
         info = {
-            "distance": distance,  # 相对距离
-            "ee_speed": ee_speed,  # 末端速度
-            "success": bool(distance <= float(self.SUCCESS_THRESHOLD)),  # 成功标记
-            "collision": bool(collision_detected),  # 碰撞标记
+            "episode_index": int(self.episode_index),
+            "step_in_episode": int(self.step_count),
+            "distance": distance,
+            "relative_distance": distance,
+            "ee_speed": ee_speed,
+            "relative_speed": ee_speed,
+            "success": done_reason == "success",
+            "collision": collision,
+            "runaway": done_reason == "runaway",
+            "done_reason": done_reason,
+            "curriculum_stage": self.current_stage,
+            "success_threshold": self._success_threshold(),
+            "episode_return": float(self.episode_return),
+            "episode_collision_count": int(self.episode_collision_count),
+            "episode_success_count": int(self.episode_success_count),
+            "lifetime_success_count": int(self.lifetime_success_count),
+            "reward_terms": reward_terms,
+            "episode_summary": episode_summary,
         }
         return state, float(reward), bool(done), bool(truncated), info
 

@@ -183,13 +183,194 @@ def make_training_envs(n_envs: int, render_mode: str | None) -> VecNormalize:
     return VecNormalize(env, norm_obs=True, norm_reward=True)
 
 
-def make_eval_env(train_env: VecNormalize) -> VecNormalize:
-    # 创建评估环境，并同步训练环境的 obs 统计量。
-    eval_env = DummyVecEnv([lambda: Monitor(UR5ReachEnv(render_mode=None))])
-    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, training=False)
-    if hasattr(train_env, "obs_rms"):
-        eval_env.obs_rms = train_env.obs_rms
-    return eval_env
+def _safe_float(value) -> float | None:
+    # 尽量把 NumPy 标量、普通数字或布尔值转成 Python `float`，失败时返回 `None`。
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value) -> int | None:
+    # 和 `_safe_float(...)` 类似，但这里希望得到整数日志字段。
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+class DetailedTrainLogCallback(BaseCallback):
+    # 训练过程诊断日志：
+    # 1. 开始训练时打印观测向量每一段的真实含义。
+    # 2. 每个向量化 step 输出一行聚合诊断。
+    # 3. 每个回合结束时输出完整摘要。
+
+    def __init__(self, verbose: int = 0) -> None:
+        super().__init__(verbose=verbose)
+        self._episode_log_order = 0
+
+    def _on_training_start(self) -> None:
+        print("observation_schema:")
+        for obs_slice, name, meaning in UR5ReachEnv.observation_schema():
+            print(f"  {obs_slice} {name}: {meaning}")
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", [])
+        rewards = np.asarray(self.locals.get("rewards", []), dtype=np.float32).reshape(-1)
+        dones = np.asarray(self.locals.get("dones", []), dtype=bool).reshape(-1)
+        if not infos:
+            return True
+
+        distances: list[float] = []
+        speeds: list[float] = []
+        episode_returns: list[float] = []
+        active_collision_counts: list[int] = []
+        lifetime_success_total = 0
+        stage_counts: dict[str, int] = {}
+        representative_info = None
+
+        for info in infos:
+            if not isinstance(info, dict):
+                continue
+            distance = _safe_float(info.get("relative_distance", info.get("distance")))
+            speed = _safe_float(info.get("relative_speed", info.get("ee_speed")))
+            episode_return = _safe_float(info.get("episode_return"))
+            collision_count = _safe_int(info.get("episode_collision_count"))
+            success_total = _safe_int(info.get("lifetime_success_count"))
+            stage = info.get("curriculum_stage")
+            if distance is not None:
+                distances.append(distance)
+            if speed is not None:
+                speeds.append(speed)
+            if episode_return is not None:
+                episode_returns.append(episode_return)
+            if collision_count is not None:
+                active_collision_counts.append(collision_count)
+            if success_total is not None:
+                lifetime_success_total += success_total
+            if isinstance(stage, str):
+                stage_counts[stage] = stage_counts.get(stage, 0) + 1
+            if representative_info is None:
+                representative_info = info
+
+        reward_mean = float(np.mean(rewards)) if rewards.size else 0.0
+        mean_distance = float(np.mean(distances)) if distances else 0.0
+        mean_speed = float(np.mean(speeds)) if speeds else 0.0
+        mean_episode_return = float(np.mean(episode_returns)) if episode_returns else 0.0
+        active_collisions = int(np.sum(active_collision_counts)) if active_collision_counts else 0
+        representative_step = _safe_int((representative_info or {}).get("step_in_episode")) or 0
+        representative_episode = _safe_int((representative_info or {}).get("episode_index")) or 0
+        stage_summary = ",".join(f"{name}:{count}" for name, count in sorted(stage_counts.items())) if stage_counts else "unknown"
+        print(
+            f"[train_step] env_steps={self.num_timesteps} episode={representative_episode} "
+            f"step={representative_step} rel_dist_mean={mean_distance:.4f} rel_speed_mean={mean_speed:.4f} "
+            f"success_total={lifetime_success_total} episode_return_mean={mean_episode_return:.3f} "
+            f"collision_count_active={active_collisions} reward_mean={reward_mean:.3f} stage_mix={stage_summary}"
+        )
+
+        finished_episodes: list[tuple[int, dict]] = []
+        for idx, done in enumerate(dones):
+            if not bool(done) or idx >= len(infos) or not isinstance(infos[idx], dict):
+                continue
+            summary = infos[idx].get("episode_summary") or {}
+            finished_episodes.append((idx, summary))
+
+        for idx, summary in sorted(finished_episodes, key=lambda item: item[0]):
+            self._episode_log_order += 1
+            print(
+                f"[episode_end] order={self._episode_log_order} env={idx} "
+                f"episode={_safe_int(summary.get('episode_index')) or 0} "
+                f"done_reason={summary.get('done_reason', 'unknown')} total_reward={_safe_float(summary.get('episode_return')) or 0.0:.3f} "
+                f"steps={_safe_int(summary.get('episode_steps')) or 0} final_distance={_safe_float(summary.get('final_distance')) or 0.0:.4f} "
+                f"min_distance={_safe_float(summary.get('min_distance')) or 0.0:.4f} "
+                f"final_speed={_safe_float(summary.get('final_speed')) or 0.0:.4f} "
+                f"collisions={_safe_int(summary.get('episode_collision_count')) or 0} "
+                f"episode_successes={_safe_int(summary.get('episode_success_count')) or 0} "
+                f"lifetime_successes={_safe_int(summary.get('lifetime_success_count')) or 0} "
+                f"stage={summary.get('curriculum_stage', 'unknown')}"
+            )
+        return True
+
+
+def build_parser() -> argparse.ArgumentParser:
+    # 构造主线 CLI。
+    #
+    # 参数分成三组：
+    # - 基础参数：训练/测试共用。
+    # - Training：算法训练流程参数。
+    # - Environment：任务环境参数。
+    train_defaults = RLTrainConfig()
+    env_defaults = UR5ReachEnvConfig()
+    # 先取一份 dataclass 默认值，后面 CLI 的默认参数直接从这里读，
+    # 保证“代码默认值”和“命令行默认值”始终一致。
+    parser = argparse.ArgumentParser(description="UR5 reach 单线复现入口，仅保留 UR5，支持 td3 / sac / ppo。")
+    
+    # 这组参数控制脚本整体行为，例如训练还是测试、产物目录名字以及是否手动指定模型。
+    parser.add_argument("--algo", choices=["td3", "sac", "ppo"], default=train_defaults.algo, help="算法名称。")
+    parser.add_argument("--test", action="store_true", help="切换到测试模式。")
+    parser.add_argument("--run-name", type=str, default=train_defaults.run_name, help="实验名字，也是产物目录名字。")
+    parser.add_argument("--seed", type=int, default=train_defaults.seed, help="随机种子。")
+    parser.add_argument("--episodes", type=int, default=5, help="测试模式运行多少回合。")
+    parser.add_argument("--max-steps", type=int, default=None, help="测试模式覆盖环境回合长度。")
+    parser.add_argument("--render", action="store_true", help="测试模式是否打开人类可视化窗口。")
+    parser.add_argument("--print-reward-terms", action="store_true", help="测试模式打印奖励分解。")
+    parser.add_argument("--model-path", type=str, default="", help="手动指定模型路径。")
+    parser.add_argument("--normalize-path", type=str, default="", help="手动指定 VecNormalize 路径。")
+
+    # Training 组对应 `RLTrainConfig`，主要控制 SB3 算法更新和训练过程。
+    train_group = parser.add_argument_group("Training")
+    train_group.add_argument("--total-timesteps", type=int, default=train_defaults.total_timesteps, help="总训练步数。")
+    train_group.add_argument("--n-envs", type=int, default=train_defaults.n_envs, help="并行环境数量。")
+    train_group.add_argument("--eval-freq", type=int, default=train_defaults.eval_freq, help="评估间隔。")
+    train_group.add_argument("--eval-episodes", type=int, default=train_defaults.eval_episodes, help="每次评估回合数。")
+    train_group.add_argument("--device", type=str, default=train_defaults.device, help="训练设备，例如 auto、cpu、cuda。")
+    train_group.add_argument("--learning-rate", type=float, default=train_defaults.learning_rate, help="学习率。")
+    train_group.add_argument("--buffer-size", type=int, default=train_defaults.buffer_size, help="回放池大小，PPO 下忽略。")
+    train_group.add_argument("--learning-starts", type=int, default=train_defaults.learning_starts, help="开始学习前的预热步数，PPO 下忽略。")
+    train_group.add_argument("--batch-size", type=int, default=train_defaults.batch_size, help="训练 batch 大小。")
+    train_group.add_argument("--tau", type=float, default=train_defaults.tau, help="目标网络软更新系数，PPO 下忽略。")
+    train_group.add_argument("--gamma", type=float, default=train_defaults.gamma, help="折扣因子。")
+    train_group.add_argument("--train-freq", type=int, default=train_defaults.train_freq, help="离策略算法的训练触发频率，PPO 下忽略。")
+    train_group.add_argument("--gradient-steps", type=int, default=train_defaults.gradient_steps, help="离策略算法每次更新的梯度步数，PPO 下忽略。")
+    train_group.add_argument("--policy-delay", type=int, default=train_defaults.policy_delay, help="TD3 actor 更新延迟。")
+    train_group.add_argument("--target-policy-noise", type=float, default=train_defaults.target_policy_noise, help="TD3 目标策略噪声。")
+    train_group.add_argument("--target-noise-clip", type=float, default=train_defaults.target_noise_clip, help="TD3 目标噪声裁剪。")
+    train_group.add_argument("--action-noise-sigma", type=float, default=train_defaults.action_noise_sigma, help="TD3 探索动作噪声。")
+    train_group.add_argument("--ppo-n-steps", type=int, default=train_defaults.ppo_n_steps, help="PPO rollout 长度。")
+    train_group.add_argument("--ppo-n-epochs", type=int, default=train_defaults.ppo_n_epochs, help="PPO 每轮 rollout 的优化轮数。")
+    train_group.add_argument("--ppo-gae-lambda", type=float, default=train_defaults.ppo_gae_lambda, help="PPO 的 GAE lambda。")
+    train_group.add_argument("--ppo-ent-coef", type=float, default=train_defaults.ppo_ent_coef, help="PPO 的熵正则系数。")
+    train_group.add_argument("--ppo-vf-coef", type=float, default=train_defaults.ppo_vf_coef, help="PPO value loss 权重。")
+    train_group.add_argument("--ppo-clip-range", type=float, default=train_defaults.ppo_clip_range, help="PPO 裁剪范围。")
+    train_group.add_argument("--render-training", action="store_true", help="训练时打开窗口。")
+    train_group.add_argument("--render-every", type=int, default=train_defaults.render_every, help="训练渲染刷新间隔。")
+    train_group.add_argument("--spectator-render", action="store_true", help="训练无头多并行时，在主进程单独打开一个旁观窗口。")
+    train_group.add_argument("--spectator-render-every", type=int, default=train_defaults.spectator_render_every, help="旁观窗口每隔多少个训练 step 更新一次。")
+    train_group.add_argument("--no-spectator-deterministic", action="store_false", dest="spectator_deterministic", help="让旁观模式使用随机动作采样，而不是确定性动作。")
+    parser.set_defaults(spectator_deterministic=train_defaults.spectator_deterministic)
+
+    # Environment 组对应 `UR5ReachEnvConfig`，主要控制任务定义和课程学习。
+    env_group = parser.add_argument_group("Environment")
+    env_group.add_argument("--frame-skip", type=int, default=env_defaults.frame_skip, help="每个 RL step 对应多少个物理步。")
+    env_group.add_argument("--episode-length", type=int, default=env_defaults.episode_length, help="训练模式的回合长度。")
+    env_group.add_argument("--control-mode", choices=["joint_delta", "torque"], default=env_defaults.control_mode, help="控制模式。")
+    env_group.add_argument("--joint-delta-scale", type=float, default=env_defaults.joint_delta_scale, help="关节增量控制时每步最大变化量。")
+    env_group.add_argument("--position-kp", type=float, default=env_defaults.position_kp, help="PD 比例增益。")
+    env_group.add_argument("--position-kd", type=float, default=env_defaults.position_kd, help="PD 阻尼增益。")
+    env_group.add_argument("--action-smoothing-alpha", type=float, default=env_defaults.action_smoothing_alpha, help="动作平滑系数。")
+    env_group.add_argument("--curriculum-fixed-episodes", type=int, default=env_defaults.curriculum_fixed_episodes, help="固定目标阶段回合数。")
+    env_group.add_argument("--curriculum-local-random-episodes", type=int, default=env_defaults.curriculum_local_random_episodes, help="局部随机阶段回合数。")
+    env_group.add_argument("--curriculum-local-scale", type=float, default=env_defaults.curriculum_local_scale, help="局部随机范围比例。")
+    env_group.add_argument("--fixed-target-x", type=float, default=env_defaults.fixed_target_x, help="固定目标 x。")
+    env_group.add_argument("--fixed-target-y", type=float, default=env_defaults.fixed_target_y, help="固定目标 y。")
+    env_group.add_argument("--fixed-target-z", type=float, default=env_defaults.fixed_target_z, help="固定目标 z。")
+    env_group.add_argument("--target-x-min", type=float, default=env_defaults.target_x_min, help="目标采样 x 最小值。")
+    env_group.add_argument("--target-x-max", type=float, default=env_defaults.target_x_max, help="目标采样 x 最大值。")
+    env_group.add_argument("--target-y-min", type=float, default=env_defaults.target_y_min, help="目标采样 y 最小值。")
+    env_group.add_argument("--target-y-max", type=float, default=env_defaults.target_y_max, help="目标采样 y 最大值。")
+    env_group.add_argument("--target-z-min", type=float, default=env_defaults.target_z_min, help="目标采样 z 最小值。")
+    env_group.add_argument("--target-z-max", type=float, default=env_defaults.target_z_max, help="目标采样 z 最大值。")
+    return parser
 
 
 def build_policy_kwargs(algo: str) -> dict:
@@ -282,8 +463,22 @@ def train_robot_arm(
         deterministic=True,
         render=False,
     )
-    save_vec_normalize_callback = SaveVecNormalizeCallback(eval_callback, verbose=1)
-    manual_interrupt_callback = ManualInterruptCallback(algo=algo, verbose=1)
+    callbacks.append(eval_callback)
+    callbacks.append(SaveVecNormalizeCallback(eval_callback, paths.best_normalize_path, verbose=1))
+    callbacks.append(ManualInterruptCallback(paths.interrupted_model_path, paths.interrupted_normalize_path, verbose=1))
+    callbacks.append(DetailedTrainLogCallback(verbose=1))
+    # 最后再按模式决定是否追加训练渲染或旁观渲染回调。
+    if train_config.render_training:
+        callbacks.append(TrainRenderCallback(train_config.render_every, verbose=1))
+    elif train_config.spectator_render:
+        callbacks.append(
+            SpectatorRenderCallback(
+                env_config=env_config,
+                render_every=train_config.spectator_render_every,
+                deterministic=train_config.spectator_deterministic,
+                verbose=1,
+            )
+        )
 
     callbacks = [
         eval_callback,
