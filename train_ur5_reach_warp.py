@@ -49,7 +49,7 @@ def _collect_logged_metrics(metrics: dict) -> dict[str, float]:
         "eval/timeout",
         "episode/timeout",
     )
-    logged: dict[str, float] = {}
+    logged: dict[str, float] = {}  # 输出指标容器
     for key in preferred_keys:
         if key in metrics:
             value = _metric_to_float(metrics[key])
@@ -62,8 +62,8 @@ def _rate_count_summary(rate: float, total: int) -> str:
     # 把 0~1 比例格式化成 `命中次数/总数`，便于长时间训练时快速阅读。
     #
     # 例如 success=0.125、num_envs=64 时，会输出成 `8/64`。
-    total = max(int(total), 1)
-    hits = int(round(float(rate) * total))
+    total = max(int(total), 1)  # 总数至少为 1
+    hits = int(round(float(rate) * total))  # 命中数量
     hits = max(0, min(hits, total))
     return f"{hits}/{total}"
 
@@ -92,16 +92,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sac-max-replay-size", type=int, default=3_000_000, help="SAC 回放池容量")  # SAC 容量
     parser.add_argument("--sac-grad-updates-per-step", type=int, default=1, help="SAC 每步梯度更新次数")  # SAC 更新
     parser.add_argument("--dry-run", action="store_true", help="只初始化环境和配置，不启动训练")  # 仅检查
-    return parser
+    return parser  # 返回命令行解析器
 
 
 def build_env_config() -> dict:
     # Warp 环境直接使用 default_config，训练入口只覆盖训练超参数。
-    return {}
+    return {}  # 当前不覆盖环境参数
 
 
 def build_train_config(args: argparse.Namespace) -> dict:
-    return vars(args)
+    return vars(args)  # Namespace -> dict，便于传参
 
 
 def train(train_config: dict, env_config: dict) -> int:
@@ -156,22 +156,22 @@ def train(train_config: dict, env_config: dict) -> int:
     total_steps = max(int(train_config["num_timesteps"]), 1)  # 进度条总步数
     progress_bar = tqdm(total=total_steps, desc=f"warp:{train_config['algo']}", unit="step")
     last_step = 0
-    start_time = time.monotonic()
+    start_time = time.monotonic()  # 计时起点
 
     def progress(step: int, metrics) -> None:
         # 把 Brax 训练过程中的指标转成更易读的终端进度信息。
         nonlocal last_step
         # 先更新进度条步数，再把挑选后的关键指标塞进 postfix。
-        current_step = max(int(step), 0)
+        current_step = max(int(step), 0)  # 当前步数
         visible_step = min(current_step, total_steps)
         delta = max(visible_step - last_step, 0)
         if delta:
             progress_bar.update(delta)
         last_step = visible_step
-        logged = _collect_logged_metrics(metrics)
+        logged = _collect_logged_metrics(metrics)  # 筛选关键指标
         if not logged:
             return
-        postfix: dict[str, str] = {}
+        postfix: dict[str, str] = {}  # 进度条后缀信息
         for key, value in logged.items():
             # distance 直接打印浮点数；
             # success / collision / runaway / timeout 转成“命中数/总数”；
@@ -183,7 +183,7 @@ def train(train_config: dict, env_config: dict) -> int:
                 postfix[key.replace("/", "_")] = _rate_count_summary(value, total)
             else:
                 postfix[key.replace("/", "_")] = f"{value:.3f}"
-        progress_bar.set_postfix(postfix)
+        progress_bar.set_postfix(postfix)  # 更新进度条显示
 
     if train_config["algo"] == "ppo":
         # PPO 分支主要配置 rollout 长度、mini-batch 和重复优化次数。

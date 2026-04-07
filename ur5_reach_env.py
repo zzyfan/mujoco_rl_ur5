@@ -50,6 +50,10 @@ class UR5ReachEnv(gym.Env):
     TARGET_Y_MAX = 0.50  # 目标球 y 最大值
     TARGET_Z_MIN = 0.12  # 目标球 z 最小值
     TARGET_Z_MAX = 0.30  # 目标球 z 最大值
+    TARGET_RANGE_SCALE = 0.35  # 小范围随机的采样缩放（0~1）
+    TARGET_FIXED_X = None  # 固定目标 x（None 表示用工作空间中心）
+    TARGET_FIXED_Y = None  # 固定目标 y
+    TARGET_FIXED_Z = None  # 固定目标 z
 
     TORQUE_LOW = -15.0  # 力矩下界（单位与 MuJoCo actuator 一致）
     TORQUE_HIGH = 15.0  # 力矩上界
@@ -74,6 +78,10 @@ class UR5ReachEnv(gym.Env):
 
     GRAVITY_COMPENSATION = -1.0  # 重力补偿执行器控制值
     FIXED_GRIPPER_CTRL = 0.0  # 固定夹爪控制量（当前不训练夹爪）
+    HOME_JOINT1 = 0.5183627878423158  # 初始关节1角度
+    HOME_JOINT2 = -1.4835298641951802  # 初始关节2角度
+    HOME_JOINT3 = 2.007128639793479  # 初始关节3角度
+    SUCCESS_PER_STAGE = 5  # 每成功 N 次切换一次目标采样模式
 
     def __init__(self, render_mode: str | None = None) -> None:
         super().__init__()
@@ -88,8 +96,8 @@ class UR5ReachEnv(gym.Env):
         xml_path = Path(__file__).resolve().parent / self.MODEL_XML
         if not xml_path.exists():
             raise FileNotFoundError(f"MuJoCo XML not found: {xml_path}")
-        self.model = mujoco.MjModel.from_xml_path(str(xml_path))
-        self.data = mujoco.MjData(self.model)
+        self.model = mujoco.MjModel.from_xml_path(str(xml_path))  # 静态模型
+        self.data = mujoco.MjData(self.model)  # 动态状态
 
         # 先把后续要反复查询的关节和执行器名字集中定义出来。
         self.arm_joint_names = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
@@ -120,11 +128,11 @@ class UR5ReachEnv(gym.Env):
             [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name) for name in self.gravity_actuator_names],
             dtype=np.int32,
         )
-        self.arm_qpos_adr = np.array([self.model.jnt_qposadr[idx] for idx in self.arm_joint_ids], dtype=np.int32)
-        self.arm_qvel_adr = np.array([self.model.jnt_dofadr[idx] for idx in self.arm_joint_ids], dtype=np.int32)
+        self.arm_qpos_adr = np.array([self.model.jnt_qposadr[idx] for idx in self.arm_joint_ids], dtype=np.int32)  # qpos 索引
+        self.arm_qvel_adr = np.array([self.model.jnt_dofadr[idx] for idx in self.arm_joint_ids], dtype=np.int32)  # qvel 索引
 
         # 这些索引会在 reset、step 和 reward 里反复使用。
-        self.ee_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ee_link")
+        self.ee_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ee_link")  # 末端 link
         self.target_x_qpos_adr = self.model.jnt_qposadr[
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "free_x_1")
         ]
@@ -164,6 +172,8 @@ class UR5ReachEnv(gym.Env):
         self.previous_torque = np.zeros(len(self.arm_actuator_ids), dtype=np.float32)
         self.previous_joint_velocities = np.zeros(len(self.arm_joint_ids), dtype=np.float32)
         self.step_count = 0
+        self.success_count = 0  # 累计成功次数（用于切换目标采样模式）
+        self.target_stage = 0  # 0: fixed, 1: small_random, 2: full_random
 
         # 渲染器句柄
         self.viewer = None
@@ -207,16 +217,35 @@ class UR5ReachEnv(gym.Env):
             [1.0, 0.0, 0.0, 0.0], dtype=np.float32
         )
 
-    def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
-        # 重置环境并返回首个观测。
-        super().reset(seed=seed)
-        del options
+    def _target_center(self) -> np.ndarray:
+        # 固定目标中心点（未设置固定值时取工作空间中心）
+        x = self.TARGET_FIXED_X if self.TARGET_FIXED_X is not None else 0.5 * (self.TARGET_X_MIN + self.TARGET_X_MAX)
+        y = self.TARGET_FIXED_Y if self.TARGET_FIXED_Y is not None else 0.5 * (self.TARGET_Y_MIN + self.TARGET_Y_MAX)
+        z = self.TARGET_FIXED_Z if self.TARGET_FIXED_Z is not None else 0.5 * (self.TARGET_Z_MIN + self.TARGET_Z_MAX)
+        return np.array([x, y, z], dtype=np.float32)
 
-        # 重置 MuJoCo 数据
-        mujoco.mj_resetData(self.model, self.data)  # 清空动力学状态
-
-        # 采样目标点并写入物理状态。
-        self.target_pos = np.array(
+    def _sample_target(self) -> np.ndarray:
+        # 目标采样策略：
+        # stage 0: 固定目标
+        # stage 1: 小范围随机（以中心点为基准）
+        # stage 2: 大范围随机（全随机）
+        if self.target_stage <= 0:
+            return self._target_center()
+        if self.target_stage == 1:
+            scale = float(np.clip(self.TARGET_RANGE_SCALE, 1e-3, 1.0))
+            center = self._target_center()
+            x_half = 0.5 * float(self.TARGET_X_MAX - self.TARGET_X_MIN) * scale
+            y_half = 0.5 * float(self.TARGET_Y_MAX - self.TARGET_Y_MIN) * scale
+            z_half = 0.5 * float(self.TARGET_Z_MAX - self.TARGET_Z_MIN) * scale
+            return np.array(
+                [
+                    self.np_random.uniform(center[0] - x_half, center[0] + x_half),
+                    self.np_random.uniform(center[1] - y_half, center[1] + y_half),
+                    self.np_random.uniform(center[2] - z_half, center[2] + z_half),
+                ],
+                dtype=np.float32,
+            )
+        return np.array(
             [
                 self.np_random.uniform(self.TARGET_X_MIN, self.TARGET_X_MAX),
                 self.np_random.uniform(self.TARGET_Y_MIN, self.TARGET_Y_MAX),
@@ -224,7 +253,38 @@ class UR5ReachEnv(gym.Env):
             ],
             dtype=np.float32,
         )
+
+    def _home_joint_positions(self) -> np.ndarray:
+        # 返回默认初始姿态关节角（与 Warp 线保持一致）。
+        q1 = float(self.HOME_JOINT1)
+        q2 = float(self.HOME_JOINT2)
+        q3 = float(self.HOME_JOINT3)
+        return np.array(
+            [
+                q1,
+                q2,
+                q3,
+                1.5 * np.pi - q2 - q3,
+                1.5 * np.pi,
+                1.25 * np.pi + q1,
+            ],
+            dtype=np.float32,
+        )
+
+    def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
+        # 重置环境并返回首个观测。
+        super().reset(seed=seed)
+        del options
+
+        # 重置 MuJoCo 数据
+        mujoco.mj_resetData(self.model, self.data)  # 清空动力学状态
+        self.data.qpos[self.arm_qpos_adr] = self._home_joint_positions()  # 设置机械臂初始姿态
+        self.data.qvel[self.arm_qvel_adr] = 0.0  # 清空机械臂关节速度
+
+        # 采样目标点并写入物理状态。
+        self.target_pos = self._sample_target()
         self._set_target_position(self.target_pos)  # 把目标球移动到采样位置
+        mujoco.mj_forward(self.model, self.data)  # 让初始姿态和目标生效
 
         # 重置控制量（力矩 / 夹爪 / 重力补偿）
         self.data.ctrl[:] = 0.0  # 清空所有执行器控制量
@@ -241,7 +301,13 @@ class UR5ReachEnv(gym.Env):
 
         # 获取初始状态
         state = self._get_state()  # 组装观测向量
-        return state, {}
+        info = {
+            "distance": float(np.linalg.norm(self.target_pos - self.data.xpos[self.ee_body_id])),  # 相对距离
+            "ee_speed": 0.0,  # 末端速度（初始为 0）
+            "success": False,  # 是否成功命中目标
+            "collision": False,  # 是否发生碰撞
+        }
+        return state, info
 
     def step(self, action: np.ndarray):
         # 推进一步物理并计算回报。
@@ -336,6 +402,9 @@ class UR5ReachEnv(gym.Env):
                 reward += float(self.SUCCESS_SPEED_BONUS_SLOW)
             elif ee_speed < 0.1:
                 reward += float(self.SUCCESS_SPEED_BONUS_MEDIUM)
+            self.success_count += 1
+            if self.success_count % int(self.SUCCESS_PER_STAGE) == 0:
+                self.target_stage = min(self.target_stage + 1, 2)
 
         # 碰撞直接结束
         if collision_detected:
@@ -344,7 +413,13 @@ class UR5ReachEnv(gym.Env):
 
         truncated = self.step_count >= int(self.EPISODE_LENGTH)  # 超过最大步数即截断
 
-        return state, float(reward), bool(done), bool(truncated), {}
+        info = {
+            "distance": distance,  # 相对距离
+            "ee_speed": ee_speed,  # 末端速度
+            "success": bool(distance <= float(self.SUCCESS_THRESHOLD)),  # 成功标记
+            "collision": bool(collision_detected),  # 碰撞标记
+        }
+        return state, float(reward), bool(done), bool(truncated), info
 
     def render(self):
         # 渲染环境。

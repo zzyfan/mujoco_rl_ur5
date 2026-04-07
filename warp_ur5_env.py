@@ -155,11 +155,11 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         if not xml_path.exists():
             raise FileNotFoundError(f"未找到 Warp GPU 环境模型文件: {xml_path}")
         self._xml_path = str(xml_path)
-        self._mj_model = mujoco.MjModel.from_xml_path(self._xml_path)
+        self._mj_model = mujoco.MjModel.from_xml_path(self._xml_path)  # host 侧模型
         # 这里同步 MuJoCo 模型的物理步长，让 host 模型和 Warp 配置保持一致。
         self._mj_model.opt.timestep = self.sim_dt
         # 关键一步：把 MuJoCo host 模型转换成 MJX / Warp 可执行模型。
-        self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+        self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)  # 转成 Warp 可执行模型
         self._post_init()
 
     def _post_init(self) -> None:
@@ -168,33 +168,33 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         # 这一步的目的是把名字查索引、阈值数组转换、mask 构造这些只需做一次的工作
         # 提前处理掉，避免每个 step 里重复做 Python 侧开销。
         # 第一组缓存：机械臂关节、执行器、夹爪和重力补偿执行器的索引。
-        self._arm_joint_ids = np.array([self.mj_model.joint(name).id for name in _ARM_JOINT_NAMES], dtype=np.int32)
-        self._arm_actuator_ids = np.array([self.mj_model.actuator(name).id for name in _ARM_ACTUATOR_NAMES], dtype=np.int32)
+        self._arm_joint_ids = np.array([self.mj_model.joint(name).id for name in _ARM_JOINT_NAMES], dtype=np.int32)  # 关节 id
+        self._arm_actuator_ids = np.array([self.mj_model.actuator(name).id for name in _ARM_ACTUATOR_NAMES], dtype=np.int32)  # 执行器 id
         self._gripper_actuator_ids = np.array([self.mj_model.actuator(name).id for name in _GRIPPER_ACTUATOR_NAMES], dtype=np.int32)
         self._gravity_actuator_ids = np.array([self.mj_model.actuator(name).id for name in _GRAVITY_ACTUATOR_NAMES], dtype=np.int32)
-        self._arm_qpos_adr = np.array([self.mj_model.jnt_qposadr[j] for j in self._arm_joint_ids], dtype=np.int32)
-        self._arm_qvel_adr = np.array([self.mj_model.jnt_dofadr[j] for j in self._arm_joint_ids], dtype=np.int32)
+        self._arm_qpos_adr = np.array([self.mj_model.jnt_qposadr[j] for j in self._arm_joint_ids], dtype=np.int32)  # qpos 索引
+        self._arm_qvel_adr = np.array([self.mj_model.jnt_dofadr[j] for j in self._arm_joint_ids], dtype=np.int32)  # qvel 索引
 
         # 第二组缓存：末端、目标和机器人根节点的 body 索引。
-        self._left_finger_body_id = self.mj_model.body("left_follower_link").id
-        self._right_finger_body_id = self.mj_model.body("right_follower_link").id
-        self._target_body_id = self.mj_model.body("target_body_1").id
-        self._robot_root_body_id = self.mj_model.body("base_link").id
+        self._left_finger_body_id = self.mj_model.body("left_follower_link").id  # 左指尖
+        self._right_finger_body_id = self.mj_model.body("right_follower_link").id  # 右指尖
+        self._target_body_id = self.mj_model.body("target_body_1").id  # 目标球 body
+        self._robot_root_body_id = self.mj_model.body("base_link").id  # 机器人根节点
 
         # 第三组缓存：目标点对应自由关节在 qpos 里的地址，用来直接改目标位置。
-        self._target_x_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_x_1").id]
-        self._target_y_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_y_1").id]
-        self._target_z_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_z_1").id]
-        self._target_ball_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_ball_1").id]
+        self._target_x_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_x_1").id]  # 目标 x 关节
+        self._target_y_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_y_1").id]  # 目标 y 关节
+        self._target_z_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_z_1").id]  # 目标 z 关节
+        self._target_ball_qpos_adr = self.mj_model.jnt_qposadr[self.mj_model.joint("free_ball_1").id]  # 目标球旋转关节
 
         # 用 host 侧 MuJoCo 跑一次前向传播，取出 reset 时需要复用的默认状态。
         data = mujoco.MjData(self.mj_model)
         mujoco.mj_forward(self.mj_model, data)
-        self._home_qpos = jp.asarray(data.qpos.copy())
-        self._home_qvel = jp.asarray(data.qvel.copy())
+        self._home_qpos = jp.asarray(data.qpos.copy())  # reset 用的默认 qpos
+        self._home_qvel = jp.asarray(data.qvel.copy())  # reset 用的默认 qvel
         # 这些是 reset / step 中反复复用的常量张量，提前缓存成 JAX 数组更省事。
-        self._zero_action = jp.zeros(6, dtype=jp.float32)
-        self._zero_ee_vel = jp.zeros(3, dtype=jp.float32)
+        self._zero_action = jp.zeros(6, dtype=jp.float32)  # 6 维零动作
+        self._zero_ee_vel = jp.zeros(3, dtype=jp.float32)  # 末端零速度
         self._phase_thresholds = jp.asarray(self._config.phase_thresholds, dtype=jp.float32)
         self._phase_rewards = jp.asarray(self._config.phase_rewards, dtype=jp.float32)
         self._identity_quat = jp.asarray([1.0, 0.0, 0.0, 0.0], dtype=jp.float32)

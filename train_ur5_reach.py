@@ -24,7 +24,8 @@ import torch.nn as nn
 from stable_baselines3 import PPO, SAC, TD3
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.noise import NormalActionNoise
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
+from stable_baselines3.common.monitor import Monitor
 
 from ur5_reach_env import UR5ReachEnv
 
@@ -105,6 +106,70 @@ class TrainRenderCallback(BaseCallback):
         return True
 
 
+class EpisodeLogCallback(BaseCallback):
+    # 每回合输出：碰撞次数、成功次数、平均距离、最小距离、平均速度
+    def __init__(self, verbose: int = 0) -> None:
+        super().__init__(verbose=verbose)
+        self._collision_counts = None  # 每回合碰撞次数统计
+        self._success_counts = None  # 每回合成功次数统计
+        self._sum_distance = None  # 累积距离（用于平均距离）
+        self._min_distance = None  # 最小距离
+        self._sum_speed = None  # 累积速度（用于平均速度）
+        self._step_counts = None  # 步数计数
+
+    def _init_arrays(self, n_envs: int) -> None:
+        self._collision_counts = np.zeros(n_envs, dtype=np.int32)  # 初始化碰撞计数
+        self._success_counts = np.zeros(n_envs, dtype=np.int32)  # 初始化成功计数
+        self._sum_distance = np.zeros(n_envs, dtype=np.float32)  # 初始化距离累积
+        self._min_distance = np.full(n_envs, np.inf, dtype=np.float32)  # 初始化最小距离
+        self._sum_speed = np.zeros(n_envs, dtype=np.float32)  # 初始化速度累积
+        self._step_counts = np.zeros(n_envs, dtype=np.int32)  # 初始化步数计数
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", [])
+        dones = self.locals.get("dones", [])
+        n_envs = len(infos)
+        if self._collision_counts is None:
+            self._init_arrays(n_envs)
+        for idx, info in enumerate(infos):
+            if not isinstance(info, dict):
+                continue
+            if "collision" in info and bool(info["collision"]):
+                self._collision_counts[idx] += 1  # 统计碰撞
+            if "success" in info and bool(info["success"]):
+                self._success_counts[idx] += 1  # 统计成功
+            if "distance" in info:
+                try:
+                    distance = float(info["distance"])  # 当前距离
+                    self._sum_distance[idx] += distance  # 累加距离
+                    self._min_distance[idx] = min(self._min_distance[idx], distance)  # 更新最小距离
+                except (TypeError, ValueError):
+                    pass
+            if "ee_speed" in info:
+                try:
+                    self._sum_speed[idx] += float(info["ee_speed"])  # 累加速度
+                except (TypeError, ValueError):
+                    pass
+            self._step_counts[idx] += 1  # 步数累加
+            if idx < len(dones) and bool(dones[idx]):
+                steps = max(int(self._step_counts[idx]), 1)  # 防止除零
+                avg_distance = float(self._sum_distance[idx]) / steps  # 平均距离
+                avg_speed = float(self._sum_speed[idx]) / steps  # 平均速度
+                print(
+                    f"[episode] env={idx} collisions={int(self._collision_counts[idx])} "
+                    f"successes={int(self._success_counts[idx])} "
+                    f"avg_dist={avg_distance:.4f} min_dist={float(self._min_distance[idx]):.4f} "
+                    f"avg_speed={avg_speed:.4f}"
+                )
+                self._collision_counts[idx] = 0  # 清空碰撞计数
+                self._success_counts[idx] = 0  # 清空成功计数
+                self._sum_distance[idx] = 0.0  # 清空距离累积
+                self._min_distance[idx] = np.inf  # 清空最小距离
+                self._sum_speed[idx] = 0.0  # 清空速度累积
+                self._step_counts[idx] = 0  # 清空步数计数
+        return True
+
+
 def make_training_envs(n_envs: int, render_mode: str | None) -> VecNormalize:
     # 创建训练环境。render_mode 使用 Gymnasium 官方命名（None / "human"）。
     # 训练过程中仅主动渲染第一个环境，避免弹出多个窗口。
@@ -112,22 +177,26 @@ def make_training_envs(n_envs: int, render_mode: str | None) -> VecNormalize:
     def _make_env(render_mode=render_mode):
         return UR5ReachEnv(render_mode=render_mode)
 
-    env_fns = [_make_env for _ in range(max(int(n_envs), 1))]
-    env = DummyVecEnv(env_fns)
+    env_fns = [_make_env for _ in range(max(int(n_envs), 1))]  # 生成环境工厂列表
+    # 并行环境优先用 SubprocVecEnv（多进程），单环境时用 DummyVecEnv
+    env = SubprocVecEnv(env_fns) if len(env_fns) > 1 else DummyVecEnv(env_fns)  # 多进程/单进程切换
     return VecNormalize(env, norm_obs=True, norm_reward=True)
 
 
 def make_eval_env(train_env: VecNormalize) -> VecNormalize:
     # 创建评估环境，并同步训练环境的 obs 统计量。
-    eval_env = DummyVecEnv([lambda: UR5ReachEnv(render_mode=None)])
+    eval_env = DummyVecEnv([lambda: Monitor(UR5ReachEnv(render_mode=None))])
     eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, training=False)
     if hasattr(train_env, "obs_rms"):
         eval_env.obs_rms = train_env.obs_rms
     return eval_env
 
 
-def build_policy_kwargs() -> dict:
-    # 自定义网络结构：Actor / Critic 均使用 [512, 512, 256]。
+def build_policy_kwargs(algo: str) -> dict:
+    # 自定义网络结构：Actor / Critic 使用 [512, 512, 256]。
+    # PPO 需要 pi/vf，SAC/TD3 需要 pi/qf。
+    if algo == "ppo":
+        return {"net_arch": dict(pi=[512, 512, 256], vf=[512, 512, 256]), "activation_fn": nn.ReLU}  # ReLU 激活
     return {"net_arch": dict(pi=[512, 512, 256], qf=[512, 512, 256]), "activation_fn": nn.ReLU}  # ReLU 激活
 
 
@@ -149,15 +218,15 @@ def train_robot_arm(
     # - TD3 使用 action noise 来提升探索
     # - SAC 自带熵正则，不强依赖外部噪声
     # - PPO 为 on-policy，不使用动作噪声
-    n_actions = env.action_space.shape[-1]
+    n_actions = env.action_space.shape[-1]  # 动作维度
     action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=2.5 * np.ones(n_actions))
 
-    policy_kwargs = build_policy_kwargs()
+    policy_kwargs = build_policy_kwargs(algo)  # 按算法生成网络结构
 
     # 创建模型
     # 这里把各算法的关键超参写死在代码里，便于和 zero-arm 对照。
     # 如果需要更细粒度调参，可把这些参数改为 CLI 选项。
-    model_cls = _model_class(algo)
+    model_cls = _model_class(algo)  # 选择算法类
     if algo == "ppo":
         model = model_cls(
             "MlpPolicy",
@@ -176,10 +245,18 @@ def train_robot_arm(
             policy_kwargs=policy_kwargs,
         )
     else:
+        # SAC 与 TD3 参数并不完全一致，这里用条件参数避免传入无效字段。
+        td3_only_kwargs = {}  # TD3 专用参数
+        if algo == "td3":
+            td3_only_kwargs = {
+                "policy_delay": 4,  # TD3 延迟更新策略网络
+                "target_policy_noise": 0.2,  # TD3 目标噪声
+                "target_noise_clip": 0.5,  # TD3 目标噪声裁剪
+            }
+        action_noise_kw = {"action_noise": action_noise} if algo == "td3" else {}  # TD3 动作噪声
         model = model_cls(
             "MlpPolicy",
             env,
-            action_noise=action_noise if algo == "td3" else None,
             verbose=1,
             device=device,
             learning_rate=3e-4,  # Adam 学习率
@@ -190,14 +267,13 @@ def train_robot_arm(
             gamma=0.99,  # 折扣因子
             train_freq=1,  # 每步更新频率
             gradient_steps=1,  # 每次采样后更新次数
-            policy_delay=4 if algo == "td3" else 1,  # TD3 延迟更新策略网络
-            target_policy_noise=0.2 if algo == "td3" else 0.0,  # TD3 目标噪声
-            target_noise_clip=0.5 if algo == "td3" else 0.0,  # TD3 目标噪声裁剪
             policy_kwargs=policy_kwargs,
+            **action_noise_kw,
+            **td3_only_kwargs,
         )
 
     # 创建评估环境和回调函数
-    eval_env = make_eval_env(env)
+    eval_env = make_eval_env(env)  # 评估环境
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path="./logs/best_model",
@@ -209,7 +285,12 @@ def train_robot_arm(
     save_vec_normalize_callback = SaveVecNormalizeCallback(eval_callback, verbose=1)
     manual_interrupt_callback = ManualInterruptCallback(algo=algo, verbose=1)
 
-    callbacks = [eval_callback, save_vec_normalize_callback, manual_interrupt_callback]  # 训练回调集合
+    callbacks = [
+        eval_callback,
+        save_vec_normalize_callback,
+        manual_interrupt_callback,
+        EpisodeLogCallback(verbose=1),
+    ]  # 训练回调集合
     if render_mode == "human":
         callbacks.append(TrainRenderCallback(render_every=render_every, render_index=0, verbose=1))
 
