@@ -239,6 +239,7 @@ class DetailedTrainLogCallback(BaseCallback):
 
     def __init__(self, verbose: int = 0) -> None:
         super().__init__(verbose=verbose)
+        self._episode_log_order = 0
 
     def _on_training_start(self) -> None:
         print("observation_schema:")
@@ -299,12 +300,18 @@ class DetailedTrainLogCallback(BaseCallback):
             f"collision_count_active={active_collisions} reward_mean={reward_mean:.3f} stage_mix={stage_summary}"
         )
 
+        finished_episodes: list[tuple[int, dict]] = []
         for idx, done in enumerate(dones):
             if not bool(done) or idx >= len(infos) or not isinstance(infos[idx], dict):
                 continue
             summary = infos[idx].get("episode_summary") or {}
+            finished_episodes.append((idx, summary))
+
+        for idx, summary in sorted(finished_episodes, key=lambda item: item[0]):
+            self._episode_log_order += 1
             print(
-                f"[episode_end] env={idx} episode={_safe_int(summary.get('episode_index')) or 0} "
+                f"[episode_end] order={self._episode_log_order} env={idx} "
+                f"episode={_safe_int(summary.get('episode_index')) or 0} "
                 f"done_reason={summary.get('done_reason', 'unknown')} total_reward={_safe_float(summary.get('episode_return')) or 0.0:.3f} "
                 f"steps={_safe_int(summary.get('episode_steps')) or 0} final_distance={_safe_float(summary.get('final_distance')) or 0.0:.4f} "
                 f"min_distance={_safe_float(summary.get('min_distance')) or 0.0:.4f} "

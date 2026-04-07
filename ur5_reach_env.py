@@ -182,12 +182,12 @@ class UR5ReachEnv(gym.Env):
         return result
 
     def _collect_ignored_contact_geom_ids(self) -> set[int]:
-        # 收集在碰撞判定中需要忽略的几何体，例如目标球和装饰灯光。
+        # 收集在碰撞判定中需要忽略的几何体，例如装饰灯光。
         ignored: set[int] = set()
         for geom_id in range(self.model.ngeom):
-            # 这些 geom 主要用于可视化或提示，不应该参与失败碰撞判定。
+            # 这些 geom 主要用于可视化提示，不应该参与失败碰撞判定。
             name = self.model.geom(geom_id).name or ""
-            if name.startswith("target_") or name.startswith("light_"):
+            if name.startswith("light_"):
                 ignored.add(int(geom_id))
         return ignored
 
@@ -362,7 +362,7 @@ class UR5ReachEnv(gym.Env):
         return smoothed
 
     def _has_external_collision(self) -> bool:
-        # 把机器人与外部环境的碰撞视为失败，但忽略机器人自碰撞和目标标记。
+        # 把机器人与外部环境的碰撞视为失败，但忽略机器人自碰撞和纯装饰 geom。
         geom_body_ids = self.model.geom_bodyid
         for contact_index in range(self.data.ncon):
             # 逐条读取当前活跃 contact，再按名字和 body 归属过滤掉不危险的碰撞。

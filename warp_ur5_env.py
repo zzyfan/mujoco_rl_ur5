@@ -164,12 +164,12 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         return mask
 
     def _build_ignored_contact_geom_mask(self) -> np.ndarray:
-        # 构造被忽略的 geom mask，例如目标球和装饰灯光。
+        # 构造被忽略的 geom mask，例如装饰灯光。
         mask = np.zeros(self.mj_model.ngeom, dtype=bool)
         for geom_id in range(self.mj_model.ngeom):
             # 这里按 geom 名字过滤，是因为这些物体本身只用于观察，不该被当成训练失败碰撞。
             name = self.mj_model.geom(geom_id).name or ""
-            if name.startswith("target_") or name.startswith("light_"):
+            if name.startswith("light_"):
                 mask[geom_id] = True
         return mask
 
@@ -394,7 +394,7 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         raw_contacts = jp.sum(active_mask).astype(jp.float32)
 
         # 下面这一段会把所有活跃接触进一步过滤成“真正危险的碰撞”：
-        # 1. 目标球和灯光忽略
+        # 1. 纯装饰 geom 忽略
         # 2. 机器人内部自碰撞忽略
         # 3. 只保留“机器人 vs 外部物体”的碰撞
         geom1 = jp.asarray(contact.geom1)
