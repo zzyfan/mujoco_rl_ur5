@@ -15,7 +15,11 @@ python train_ur5_reach.py --algo ppo --total-timesteps 1500000
 ### Test
 
 ```bash
+<<<<<<< HEAD
 python train_ur5_reach.py --algo sac --test --episodes 1 --render
+=======
+python train_ur5_reach.py --algo sac --test --episodes 1 --render-mode human
+>>>>>>> fa46e0e (Add learning notebooks and expand inline comments)
 ```
 
 ### Common Flags
@@ -23,8 +27,13 @@ python train_ur5_reach.py --algo sac --test --episodes 1 --render
 - `--algo`：`td3` / `sac` / `ppo`
 - `--total-timesteps`：训练总步数
 - `--n-envs`：并行环境数
+<<<<<<< HEAD
 - `--render`：测试时打开窗口
 - `--render-every`：训练时渲染频率（需 `--render`）
+=======
+- `--render-mode`：训练渲染模式（`none` / `human`）
+- `--render-every`：训练时渲染频率（需 `--render-mode human`）
+>>>>>>> fa46e0e (Add learning notebooks and expand inline comments)
 - `--device`：`auto` / `cpu` / `cuda`
 
 ## Warp Line (Brax + MJX/Warp)
@@ -54,4 +63,7 @@ python train_ur5_reach_warp.py --algo ppo --num-envs 256 --num-timesteps 5000000
 Warp 线训练产物：
 
 - `./warp_runs/{algo}/{run_name}/`
+<<<<<<< HEAD
 
+=======
+>>>>>>> fa46e0e (Add learning notebooks and expand inline comments)
