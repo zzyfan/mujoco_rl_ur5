@@ -22,7 +22,73 @@ from ml_collections import config_dict
 from mujoco import mjx
 from mujoco_playground._src import mjx_env
 
-from warp_ur5_config import WarpUR5EnvConfig, project_root
+# 默认配置直接内联在本文件中，避免依赖额外配置模块。
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+_DEFAULTS = dict(
+    model_xml="assets/robotiq_cxy/lab_env.xml",
+    sim_dt=0.02,
+    frame_skip=1,
+    episode_length=3000,
+    naconmax=128,
+    naccdmax=128,
+    njmax=64,
+    target_x_min=-0.95,
+    target_x_max=-0.60,
+    target_y_min=0.15,
+    target_y_max=0.50,
+    target_z_min=0.12,
+    target_z_max=0.30,
+    target_sampling_mode="full_random",
+    target_range_scale=0.35,
+    fixed_target_x=None,
+    fixed_target_y=None,
+    fixed_target_z=None,
+    success_threshold=0.010,
+    stage1_success_threshold=0.010,
+    stage2_success_threshold=0.010,
+    torque_low=-15.0,
+    torque_high=15.0,
+    action_target_scale=1.0,
+    action_smoothing_alpha=0.0,
+    controller_mode="torque",
+    joint_position_delta_scale=0.06,
+    position_control_kp=55.0,
+    position_control_kd=4.0,
+    goal_observation=False,
+    reward_mode="dense",
+    fixed_gripper_ctrl=0.0,
+    enable_gravity_motors=True,
+    gravity_ctrl=-1.0,
+    home_joint1=0.5183627878423158,
+    home_joint2=-1.4835298641951802,
+    home_joint3=2.007128639793479,
+    step_penalty=0.10,
+    base_distance_weight=0.80,
+    improvement_gain=1.0,
+    regress_gain=0.8,
+    speed_penalty_threshold=0.5,
+    speed_penalty_value=0.2,
+    direction_reward_gain=1.0,
+    joint_vel_change_penalty_gain=0.03,
+    action_magnitude_penalty_gain=0.0,
+    action_change_penalty_gain=0.0,
+    idle_distance_threshold=0.08,
+    idle_speed_threshold=0.015,
+    idle_penalty_value=0.0,
+    phase_thresholds=(0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002),
+    phase_rewards=(100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0),
+    success_bonus=10000.0,
+    success_remaining_step_gain=4.0,
+    success_speed_bonus_very_slow=2000.0,
+    success_speed_bonus_slow=1000.0,
+    success_speed_bonus_medium=500.0,
+    collision_penalty_value=5000.0,
+    runaway_distance_threshold=10.0,
+    runaway_ee_speed_threshold=50.0,
+    runaway_joint_velocity_threshold=100.0,
+    runaway_penalty_value=0.0,
+)
 
 _ARM_JOINT_NAMES = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
 _ARM_ACTUATOR_NAMES = (
@@ -43,14 +109,14 @@ def default_config() -> config_dict.ConfigDict:
     #
     # Warp 训练线的环境类最终读取的是 `ConfigDict`，因此这里负责把普通 dataclass
     # 转换成 Playground 和 Brax 训练器都能识别的配置对象。
-    # 先实例化 dataclass，拿到一套可读性最好的默认参数。
-    cfg = WarpUR5EnvConfig()
-    # 再把 dataclass 展开成 Playground 能识别的 `ConfigDict`。
-    #
     # 这里额外补上两个字段：
     # - `ctrl_dt`：控制周期，等于单个物理步长乘以 frame_skip
     # - `impl`：明确告诉 MJX / Playground 使用 Warp 后端
-    return config_dict.create(**cfg.__dict__, ctrl_dt=cfg.sim_dt * max(int(cfg.frame_skip), 1), action_repeat=1, impl=_WARP_IMPL)
+    cfg = config_dict.create(**_DEFAULTS)
+    cfg.ctrl_dt = cfg.sim_dt * max(int(cfg.frame_skip), 1)
+    cfg.action_repeat = 1
+    cfg.impl = _WARP_IMPL
+    return cfg
 
 
 class UR5WarpReachEnv(mjx_env.MjxEnv):
@@ -75,7 +141,7 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         super().__init__(base_config, None)
 
         # 读取仓库里的 MuJoCo XML，并准备 host 侧 MuJoCo 模型。
-        xml_path = (project_root() / self._config.model_xml).resolve()
+        xml_path = (PROJECT_ROOT / self._config.model_xml).resolve()
         if not xml_path.exists():
             raise FileNotFoundError(f"未找到 Warp GPU 环境模型文件: {xml_path}")
         self._xml_path = str(xml_path)

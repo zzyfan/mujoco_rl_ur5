@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # 主线 UR5 到点任务环境。
 #
-#
 # 本模块把一个 UR5 到点任务包装成标准 Gymnasium 环境。
 #
 # 涉及的主要外部库：
@@ -14,6 +13,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
@@ -25,8 +25,6 @@ try:
     import mujoco.viewer as mj_viewer
 except Exception:
     mj_viewer = None
-
-from ur5_reach_config import UR5ReachEnvConfig, project_root
 
 
 class UR5ReachEnv(gym.Env):
@@ -41,20 +39,55 @@ class UR5ReachEnv(gym.Env):
 
     metadata = {"render_modes": ["human"], "render_fps": 30}
 
-    def __init__(self, config: UR5ReachEnvConfig | None = None, render_mode: str | None = None) -> None:
+    # 训练参数默认值（与旧版配置保持一致）
+    MODEL_XML = "assets/robotiq_cxy/lab_env.xml"
+    FRAME_SKIP = 1
+    EPISODE_LENGTH = 3000
+
+    TARGET_X_MIN = -0.95
+    TARGET_X_MAX = -0.60
+    TARGET_Y_MIN = 0.15
+    TARGET_Y_MAX = 0.50
+    TARGET_Z_MIN = 0.12
+    TARGET_Z_MAX = 0.30
+
+    TORQUE_LOW = -15.0
+    TORQUE_HIGH = 15.0
+
+    STEP_PENALTY = 0.10
+    DISTANCE_WEIGHT = 0.80
+    PROGRESS_REWARD_GAIN = 1.0
+    REGRESS_PENALTY_GAIN = 0.8
+    PHASE_THRESHOLDS = (0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002)
+    PHASE_REWARDS = (100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0)
+    SPEED_PENALTY_THRESHOLD = 0.5
+    SPEED_PENALTY_VALUE = 0.2
+    DIRECTION_REWARD_GAIN = 1.0
+    JOINT_VELOCITY_PENALTY = 0.03
+    COLLISION_PENALTY = 5000.0
+    SUCCESS_BONUS = 10000.0
+    SUCCESS_REMAINING_STEP_GAIN = 4.0
+    SUCCESS_SPEED_BONUS_VERY_SLOW = 2000.0
+    SUCCESS_SPEED_BONUS_SLOW = 1000.0
+    SUCCESS_SPEED_BONUS_MEDIUM = 500.0
+    SUCCESS_THRESHOLD = 0.01
+
+    GRAVITY_COMPENSATION = -1.0
+    FIXED_GRIPPER_CTRL = 0.0
+
+    def __init__(self, render_mode: str | None = None) -> None:
         super().__init__()
-        # 如果外部没有显式传配置，就使用主线默认环境配置。
-        self.config = config or UR5ReachEnvConfig()
         self.render_mode = render_mode
         if self.render_mode not in (None, "human"):
             raise ValueError(f"Unsupported render_mode: {self.render_mode}")
 
-        # `model_xml` 使用相对仓库根目录的路径，避免在不同机器上硬编码绝对路径。
-        xml_path = project_root() / self.config.model_xml
-        if not xml_path.exists():
-            raise FileNotFoundError(f"MuJoCo XML not found: {xml_path}")
+        if not self.MODEL_XML:
+            raise ValueError("MODEL_XML is empty.")
 
         # MuJoCo 负责解析 XML、构造动力学模型和维护运行时状态。
+        xml_path = Path(__file__).resolve().parent / self.MODEL_XML
+        if not xml_path.exists():
+            raise FileNotFoundError(f"MuJoCo XML not found: {xml_path}")
         self.model = mujoco.MjModel.from_xml_path(str(xml_path))
         self.data = mujoco.MjData(self.model)
 
@@ -108,8 +141,8 @@ class UR5ReachEnv(gym.Env):
         # Gymnasium 需要显式声明动作空间和观测空间。
         # 动作空间：力矩
         self.action_space = spaces.Box(
-            low=float(self.config.torque_low),
-            high=float(self.config.torque_high),
+            low=float(self.TORQUE_LOW),
+            high=float(self.TORQUE_HIGH),
             shape=(len(self.arm_actuator_ids),),
             dtype=np.float32,
         )
@@ -123,18 +156,14 @@ class UR5ReachEnv(gym.Env):
         )
 
         # 下面这组成员变量用于跨 step 保存历史信息，参与奖励和终止判定。
-        self.target_pos = np.array(
-            [self.config.fixed_target_x, self.config.fixed_target_y, self.config.fixed_target_z], dtype=np.float32
-        )
+        self.target_pos = np.zeros(3, dtype=np.float32)
         self.previous_distance = None
         self.min_distance = None
         self.previous_torque = np.zeros(len(self.arm_actuator_ids), dtype=np.float32)
         self.previous_joint_velocities = np.zeros(len(self.arm_joint_ids), dtype=np.float32)
         self.step_count = 0
-        self.success_threshold = 0.01
 
         # 渲染器句柄
-        self.render_mode = render_mode
         self.viewer = None
         self._target_viz_added = False
         self._target_geom = None
@@ -187,9 +216,9 @@ class UR5ReachEnv(gym.Env):
         # 采样目标点并写入物理状态。
         self.target_pos = np.array(
             [
-                self.np_random.uniform(self.config.target_x_min, self.config.target_x_max),
-                self.np_random.uniform(self.config.target_y_min, self.config.target_y_max),
-                self.np_random.uniform(self.config.target_z_min, self.config.target_z_max),
+                self.np_random.uniform(self.TARGET_X_MIN, self.TARGET_X_MAX),
+                self.np_random.uniform(self.TARGET_Y_MIN, self.TARGET_Y_MAX),
+                self.np_random.uniform(self.TARGET_Z_MIN, self.TARGET_Z_MAX),
             ],
             dtype=np.float32,
         )
@@ -197,8 +226,8 @@ class UR5ReachEnv(gym.Env):
 
         # 重置控制量（力矩 / 夹爪 / 重力补偿）
         self.data.ctrl[:] = 0.0
-        self.data.ctrl[self.gripper_actuator_ids] = float(self.config.fixed_gripper_ctrl)
-        self.data.ctrl[self.gravity_actuator_ids] = float(self.config.gravity_compensation)
+        self.data.ctrl[self.gripper_actuator_ids] = float(self.FIXED_GRIPPER_CTRL)
+        self.data.ctrl[self.gravity_actuator_ids] = float(self.GRAVITY_COMPENSATION)
 
         # 缓存历史量
         self.step_count = 0
@@ -221,13 +250,13 @@ class UR5ReachEnv(gym.Env):
 
         # 第二步：应用动作（扭矩）。
         action = np.asarray(action, dtype=np.float32)
-        action = np.clip(action, float(self.config.torque_low), float(self.config.torque_high))
+        action = np.clip(action, float(self.TORQUE_LOW), float(self.TORQUE_HIGH))
         self.data.ctrl[self.arm_actuator_ids] = action
-        self.data.ctrl[self.gripper_actuator_ids] = float(self.config.fixed_gripper_ctrl)
-        self.data.ctrl[self.gravity_actuator_ids] = float(self.config.gravity_compensation)
+        self.data.ctrl[self.gripper_actuator_ids] = float(self.FIXED_GRIPPER_CTRL)
+        self.data.ctrl[self.gravity_actuator_ids] = float(self.GRAVITY_COMPENSATION)
 
         # 第三步：推进物理。
-        for _ in range(max(int(self.config.frame_skip), 1)):
+        for _ in range(max(int(self.FRAME_SKIP), 1)):
             mujoco.mj_step(self.model, self.data)
 
         self.step_count += 1
@@ -241,28 +270,27 @@ class UR5ReachEnv(gym.Env):
         reward = 0.0
 
         # 时间惩罚
-        step_penalty = float(self.config.step_penalty)
-        reward -= step_penalty
+        reward -= float(self.STEP_PENALTY)
 
         # 距离进步/退步奖励
         if self.min_distance is None:
             self.min_distance = distance
             improvement_reward = 0.0
         elif distance < float(self.min_distance):
-            improvement_reward = float(self.config.progress_reward_gain) * (float(self.min_distance) - distance)
+            improvement_reward = float(self.PROGRESS_REWARD_GAIN) * (float(self.min_distance) - distance)
             self.min_distance = distance
         elif self.previous_distance is not None and distance > float(self.previous_distance):
-            improvement_reward = -float(self.config.regress_penalty_gain) * (distance - float(self.previous_distance))
+            improvement_reward = -float(self.REGRESS_PENALTY_GAIN) * (distance - float(self.previous_distance))
         else:
             improvement_reward = 0.0
         self.previous_distance = distance
 
         # 基础距离惩罚
-        base_distance_penalty = -float(self.config.distance_weight) * float(np.sqrt(distance + 1e-8))
+        base_distance_penalty = -float(self.DISTANCE_WEIGHT) * float(np.sqrt(distance + 1e-8))
 
         # 阶段性距离奖励（一次性）
         phase_distance_reward = 0.0
-        for thresh, phase_reward in zip(self.config.phase_thresholds, self.config.phase_rewards):
+        for thresh, phase_reward in zip(self.PHASE_THRESHOLDS, self.PHASE_REWARDS):
             if distance < float(thresh) and float(thresh) not in self._phase_rewards_given:
                 phase_distance_reward += float(phase_reward)
                 self._phase_rewards_given.add(float(thresh))
@@ -273,48 +301,46 @@ class UR5ReachEnv(gym.Env):
         # 速度惩罚
         ee_vel = self.data.cvel[self.ee_body_id][:3].copy()
         ee_speed = float(np.linalg.norm(ee_vel))
-        if ee_speed > float(self.config.speed_penalty_threshold):
-            reward -= float(self.config.speed_penalty_value)
+        if ee_speed > float(self.SPEED_PENALTY_THRESHOLD):
+            reward -= float(self.SPEED_PENALTY_VALUE)
 
         # 方向奖励
         to_target = self.target_pos - ee_pos
         to_target /= (np.linalg.norm(to_target) + 1e-6)
         movement_dir = ee_vel / (np.linalg.norm(ee_vel) + 1e-6)
         direction_cos = float(np.dot(to_target, movement_dir))
-        direction_reward = max(0.0, direction_cos) ** 2 * float(self.config.direction_reward_gain)
+        direction_reward = max(0.0, direction_cos) ** 2 * float(self.DIRECTION_REWARD_GAIN)
         reward += direction_reward
 
         # 碰撞惩罚（任意接触）
         collision_detected = self.data.ncon > 0
         if collision_detected:
-            reward += -float(self.config.collision_penalty)
+            reward += -float(self.COLLISION_PENALTY)
 
         # 关节速度变化惩罚
         current_joint_velocities = self.data.qvel[self.arm_qvel_adr].copy()
         joint_velocity_change = np.abs(current_joint_velocities - self.previous_joint_velocities)
-        reward += -float(self.config.joint_velocity_penalty) * float(np.sum(joint_velocity_change))
+        reward += -float(self.JOINT_VELOCITY_PENALTY) * float(np.sum(joint_velocity_change))
 
         # 成功判定
         done = False
-        if distance <= float(self.success_threshold):
+        if distance <= float(self.SUCCESS_THRESHOLD):
             done = True
-            reward += float(self.config.success_bonus)
-            reward += float(self.config.success_remaining_step_gain) * float(
-                max(int(self.config.episode_length) - self.step_count, 0)
-            )
+            reward += float(self.SUCCESS_BONUS)
+            reward += float(self.SUCCESS_REMAINING_STEP_GAIN) * float(max(int(self.EPISODE_LENGTH) - self.step_count, 0))
             if ee_speed < 0.01:
-                reward += float(self.config.success_speed_bonus_very_slow)
+                reward += float(self.SUCCESS_SPEED_BONUS_VERY_SLOW)
             elif ee_speed < 0.05:
-                reward += float(self.config.success_speed_bonus_slow)
+                reward += float(self.SUCCESS_SPEED_BONUS_SLOW)
             elif ee_speed < 0.1:
-                reward += float(self.config.success_speed_bonus_medium)
+                reward += float(self.SUCCESS_SPEED_BONUS_MEDIUM)
 
         # 碰撞直接结束
         if collision_detected:
-            reward += -step_penalty * float(max(int(self.config.episode_length) - self.step_count, 0))
+            reward += -float(self.STEP_PENALTY) * float(max(int(self.EPISODE_LENGTH) - self.step_count, 0))
             done = True
 
-        truncated = self.step_count >= int(self.config.episode_length)
+        truncated = self.step_count >= int(self.EPISODE_LENGTH)
 
         return state, float(reward), bool(done), bool(truncated), {}
 
