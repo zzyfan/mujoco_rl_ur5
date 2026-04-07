@@ -68,6 +68,15 @@ ENV_PARAMETER_DOCS: dict[str, str] = {
     "action_l2_penalty": "动作幅值惩罚系数。",
     "action_smoothness_penalty": "动作变化惩罚系数。",
     "joint_velocity_penalty": "上一时刻与当前关节速度差值的惩罚系数。",
+    "wrist_rotation_penalty": "UR5 后三轴 wrist 超出舒适微调速度后的线性惩罚系数，用于抑制持续旋转。",
+    "wrist_action_smoothness_penalty": "UR5 后三轴 wrist 控制量跳变惩罚系数，用于抑制手腕来回抖动。",
+    "wrist_speed_penalty_threshold": "UR5 后三轴 wrist 角速度阈值，超过后触发固定速度惩罚。",
+    "wrist_speed_penalty_value": "UR5 后三轴 wrist 角速度过大时的固定惩罚值。",
+    "wrist_direction_flip_penalty": "UR5 后三轴 wrist 角速度方向来回反转时的惩罚系数。",
+    "wrist_micro_adjustment_speed_threshold": "UR5 后三轴 wrist 被视为正常微调时允许的角速度阈值。",
+    "wrist_alignment_distance_threshold": "只有当末端距离目标足够近时，才启用 wrist 精细微调奖励。",
+    "wrist_alignment_ee_speed_threshold": "只有当末端线速度足够小、确实在精细对准时，才启用 wrist 微调奖励。",
+    "wrist_alignment_reward_gain": "接近目标时，wrist 小幅稳定调整并继续逼近目标的奖励系数。",
     "collision_penalty": "碰撞时的一次性惩罚。",
     "success_bonus": "成功时的一次性奖励。",
     "success_remaining_step_gain": "成功后根据剩余步数追加奖励的系数。",
@@ -155,10 +164,12 @@ class UR5ReachEnvConfig:
     # 动作与控制参数。`joint_delta` 更稳定，`torque` 更接近直接力矩控制。
     # 这些字段会直接参与 `_action_to_control()` 和 `_compute_pd_torque()`。
     control_mode: str = "torque"
-    torque_low: float = -15.0
-    torque_high: float = 15.0
+    # 默认把力矩范围收紧一些，减少策略早期学到“猛抽一下再纠正”的抖动习惯。
+    torque_low: float = -8.0
+    torque_high: float = 8.0
     joint_delta_scale: float = 0.06
-    action_smoothing_alpha: float = 0.0
+    # 主线默认打开控制量低通滤波，让策略输出更连续。
+    action_smoothing_alpha: float = 0.85
     position_kp: float = 55.0
     position_kd: float = 4.0
     gravity_compensation: float = -1.0
@@ -177,24 +188,79 @@ class UR5ReachEnvConfig:
 
     # 奖励项参数。环境里的 reward 会逐项读取这些系数并写入 reward_terms。
     # 这些字段最终会进入 `_compute_reward()` 里的各个 reward term。
-    step_penalty: float = 0.10
-    distance_weight: float = 0.80
-    progress_reward_gain: float = 1.0
+    # 适度提高每步时间成本，鼓励策略减少无效小抖动和拖延。
+    step_penalty: float = 0.20
+    # 提高距离项权重，让策略更明显地偏向持续逼近目标。
+    distance_weight: float = 1.20
+    # 统一抬高正向奖励时，先按比例放大“越靠近越奖励”的 shaping 项。
+    progress_reward_gain: float = 1.5
     regress_penalty_gain: float = 0.8
-    phase_thresholds: tuple[float, ...] = (0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002)
-    phase_rewards: tuple[float, ...] = (100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0)
-    speed_penalty_threshold: float = 0.5
-    speed_penalty_value: float = 0.2
-    direction_reward_gain: float = 1.0
+    # 在接近目标的后半段把阈值拆得更密，让策略在“快到点”和“精细逼近”时
+    # 都能收到更连续的阶段反馈，而不是只跨过几个大台阶。
+    phase_thresholds: tuple[float, ...] = (
+        0.5,
+        0.3,
+        0.1,
+        0.09,
+        0.07,
+        0.05,
+        0.03,
+        0.02,
+        0.01,
+        0.008,
+        0.005,
+        0.003,
+        0.002,
+    )
+    phase_rewards: tuple[float, ...] = (
+        150.0,
+        300.0,
+        450.0,
+        550.0,
+        700.0,
+        900.0,
+        1150.0,
+        1400.0,
+        1800.0,
+        2200.0,
+        2700.0,
+        3400.0,
+        4200.0,
+    )
+    # 末端速度约束如果太弱，策略很容易学成高频来回摆动。
+    speed_penalty_threshold: float = 0.25
+    speed_penalty_value: float = 2.0
+    direction_reward_gain: float = 1.5
     action_l2_penalty: float = 0.0
-    action_smoothness_penalty: float = 0.0
-    joint_velocity_penalty: float = 0.03
+    # 这两项直接约束动作变化和关节速度突变，是抑制抖动最直接的奖励项。
+    action_smoothness_penalty: float = 2.0
+    joint_velocity_penalty: float = 0.08
+    # 手腕三轴更容易在接近目标时出现“高频旋转找姿态”的抖动，所以单独加一层约束。
+    # 这里不再惩罚所有 wrist 旋转，而是只惩罚“超过正常微调速度”的那一部分。
+    # 设计意图是：
+    # - 接近目标时允许 wrist 做小幅姿态修正
+    # - 但不允许为了找姿态而长期高速空转
+    wrist_rotation_penalty: float = 0.12
+    wrist_action_smoothness_penalty: float = 1.5
+    # 参考末端速度惩罚，给 wrist 三轴再加一层“转太快就直接罚”的阈值型约束。
+    wrist_speed_penalty_threshold: float = 0.6
+    wrist_speed_penalty_value: float = 3.0
+    # 除了持续单向高速旋转，也显式惩罚 wrist 速度方向来回翻转。
+    wrist_direction_flip_penalty: float = 2.5
+    # 只有在接近目标时，才把 wrist 小幅稳定调整视为“正常姿态微调”并给小额奖励。
+    # 这组参数相当于给 wrist 开了一条 gated reward：
+    # - 离目标远时，不鼓励过早大量调整姿态
+    # - 足够近时，如果动作稳定、末端速度小、距离还在继续变好，就给小奖励
+    wrist_micro_adjustment_speed_threshold: float = 0.20
+    wrist_alignment_distance_threshold: float = 0.03
+    wrist_alignment_ee_speed_threshold: float = 0.10
+    wrist_alignment_reward_gain: float = 1200.0
     collision_penalty: float = 5000.0
-    success_bonus: float = 10000.0
-    success_remaining_step_gain: float = 4.0
-    success_speed_bonus_very_slow: float = 2000.0
-    success_speed_bonus_slow: float = 1000.0
-    success_speed_bonus_medium: float = 500.0
+    success_bonus: float = 15000.0
+    success_remaining_step_gain: float = 6.0
+    success_speed_bonus_very_slow: float = 3000.0
+    success_speed_bonus_slow: float = 1500.0
+    success_speed_bonus_medium: float = 750.0
     runaway_distance_threshold: float = 10.0
     runaway_penalty: float = 0.0
 
@@ -316,8 +382,10 @@ def build_run_paths(algo: str, run_name: str, root: Path | None = None) -> RunPa
     line_root = runs_root / "main"
     algo_root = line_root / algo
     run_dir = algo_root / run_name
-    # run_dir 下面再细分成 final / best_model / interrupted / tensorboard 四类产物目录。
-    final_dir = run_dir / "final"
+    # run_dir 下面再细分成 final_model / best_model / interrupted / tensorboard 四类产物目录。
+    # `final_model` 和 `best_model` 采用显式命名，方便测试命令只传 `final` / `best`
+    # 就能稳定定位到对应算法与实验下的模型文件夹。
+    final_dir = run_dir / "final_model"
     best_dir = run_dir / "best_model"
     interrupted_dir = run_dir / "interrupted"
     tensorboard_dir = run_dir / "tensorboard"

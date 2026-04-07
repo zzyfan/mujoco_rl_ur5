@@ -1,20 +1,20 @@
-# UR5 Reach RL (Main + Warp)
+# UR5 Reach RL
 
 ## Overview
 
-本仓库实现 `UR5` 到点任务的强化学习训练与测试流程，包含主线 MuJoCo + Stable-Baselines3 实现，以及可选的纯 GPU Warp 训练线。
+本仓库聚焦一件事：使用同一套 UR5 + Robotiq MuJoCo 模型完成到点任务训练，并维护两条训练线。
 
-项目内容聚焦以下方向：
+- 主线：`Stable-Baselines3 + MuJoCo`
+- Warp 线：`Brax + MJX/Warp`
 
-- `UR5` 到点任务环境与训练入口
-- 面向学习的代码注释、参数说明和实现文档
-- 兼顾本地调试、服务器训练和跨机器迁移的目录与配置设计
+这次整理后的目标是让代码、命令行、模型目录和文档保持同一套规则：
 
-ubuntu系统推荐使用warp线，最大化减少硬件数据通讯损失，后期可以迁移使用mujoco的mjlab平台，这是一个结合isaac和mujoco的新平台
+- 主线测试不再手写模型路径，只传 `--model best` 或 `--model final`
+- 测试渲染统一使用 Gymnasium 官方风格的 `--render-mode human`
+- 主线和 Warp 线都按“训练线 / 算法 / 实验名”分目录
+- `best_model/` 和 `final_model/` 都放在各自算法实验目录下
 
-windows 因为jax不支持win系统使用另一条线
-
-## Project Structure
+## Project Layout
 
 ```text
 assets/
@@ -22,244 +22,105 @@ assets/
     lab_env.xml
     meshes/
 docs/
-  IMPLEMENTATION_GUIDE.md
-  LIBRARY_USAGE.md
-  PARAMETER_REFERENCE.md
-  PORTABILITY.md
-  WARP_IMPLEMENTATION_GUIDE.md
-  WARP_PARAMETER_REFERENCE.md
+  TRAINING_GUIDE.md
 notebooks/
-  01_code_learning_walkthrough.ipynb
-  02_parameter_reference.ipynb
-  03_warp_code_learning_walkthrough.ipynb
-  04_cli_parameter_guide.ipynb
-  05_library_usage_guide.ipynb
+  01_ur5_reach_tutorial.ipynb
+  02_codebase_library_notes.ipynb
+  03_main_and_warp_design_notes.ipynb
 train_ur5_reach.py
+train_ur5_reach_warp.py
 ur5_reach_config.py
 ur5_reach_env.py
-train_ur5_reach_warp.py
-test_ur5_reach_warp.py
 warp_ur5_config.py
 warp_ur5_env.py
 warp_ur5_runtime.py
 requirements.txt
 requirements-warp.txt
-Dockerfile
 ```
-
-## Robot Model
-
-当前机械臂模型保存在仓库内相对路径：
-
-```text
-assets/robotiq_cxy/lab_env.xml
-assets/robotiq_cxy/meshes/
-```
-
-说明：
-
-- `lab_env.xml` 是主线和 Warp 训练线共同使用的 MuJoCo 场景与机械臂模型入口。
-- `meshes/` 目录保存 UR5 与 Robotiq 夹爪所需的网格文件。
-- 训练脚本通过配置中的 `model_xml` 相对路径加载模型，不依赖当前终端所在目录。
-
-## Main Pipeline
-
-`ur5_reach_config.py`
-
-- 定义环境参数、训练参数、产物路径规则。
-- 维护参数说明字典，方便 Jupyter 文档和代码学习时直接引用。
-
-`ur5_reach_env.py`
-
-- 定义 Gymnasium + MuJoCo 的 `UR5ReachEnv`。
-- 负责 reset、目标采样、动作到控制量的映射、奖励计算、碰撞判断和渲染。
-
-`train_ur5_reach.py`
-
-- 提供统一的训练与测试入口。
-- 支持 `td3`、`sac`、`ppo`。
-- 负责环境构建、模型初始化、回调注册、模型保存和评估流程。
-
-## Warp Pipeline
-
-`warp_ur5_config.py`
-
-- 定义 Warp 训练线使用的环境参数、训练参数和参数说明字典。
-
-`warp_ur5_env.py`
-
-- 定义 `UR5WarpReachEnv`。
-- 负责 Warp 环境中的 reset、目标采样、控制映射、奖励计算和接触判断。
-
-`warp_ur5_runtime.py`
-
-- 检查 `warp-lang`、`mujoco-warp` 和 `mujoco_playground` 是否可用。
-- 负责初始化 CUDA 设备并输出运行时信息。
-
-`train_ur5_reach_warp.py`
-
-- Warp 训练入口。
-- 支持 `sac` 与 `ppo`。
-
-`test_ur5_reach_warp.py`
-
-- Warp 推理与可视化入口。
-- 支持加载最终参数或中间 checkpoint。
 
 ## Installation
 
-推荐 Python `3.10` 或 `3.11`。
+主线推荐 Python `3.10` 或 `3.11`。
 
 ```bash
-# 主线训练（SAC）
-python train_ur5_reach.py --algo sac --total-timesteps 1500000
-
-# 主线测试（渲染）
-python train_ur5_reach.py --algo sac --test --episodes 1 --render
-
-# Warp 训练（SAC）
-python train_ur5_reach_warp.py --algo sac --num-envs 256 --num-timesteps 5000000
+pip install -r requirements.txt
 ```
 
-## Files
-
-- `ur5_reach_env.py`：主线 Gymnasium + MuJoCo 环境（zero‑arm 风格）
-=======
-本仓库只保留 **主线（SB3 + MuJoCo）** 与 **Warp 线（Brax + MJX/Warp）** 两条训练路径。
-目标是用同一套 UR5 模型完成到点任务训练，并提供清晰的训练/测试入口。
-
-## 项目结构
-
-## Warp Installation
-
-若需要纯 GPU Warp 训练线，请在安装主线依赖后继续执行：
+若需要 Warp 训练线，再额外安装：
 
 ```bash
 pip install -r requirements-warp.txt
 ```
 
-Warp 训练线依赖：
+说明：
 
-- `jax`
-- `brax`
-- `flax`
-- `orbax-checkpoint`
-- `mujoco-playground`
-- `warp-lang`
-- `mujoco-warp`
+- Windows 通常只跑主线，因为本地 JAX / Brax / Warp 运行时不稳定。
+- Ubuntu 服务器更适合跑 Warp 线，能够减少 CPU/GPU 之间的数据搬运。
 
-## Training
+## Main Pipeline
 
-### SAC
+主线入口是 [train_ur5_reach.py](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/train_ur5_reach.py)。
 
-```bash
-python train_ur5_reach.py \
-  --algo sac \
-  --run-name ur5_sac_main \
-  --total-timesteps 1500000
-```
+支持算法：
 
-### TD3
+- `td3`
+- `sac`
+- `ppo`
+
+训练示例：
 
 ```bash
-python train_ur5_reach.py \
-  --algo td3 \
-  --run-name ur5_td3_main \
-  --total-timesteps 1500000
+python train_ur5_reach.py --algo sac --run-name ur5_sac_main --total-timesteps 1500000
+python train_ur5_reach.py --algo td3 --run-name ur5_td3_main --total-timesteps 1500000
+python train_ur5_reach.py --algo ppo --run-name ur5_ppo_main --total-timesteps 1500000
 ```
 
-### PPO
+测试示例：
 
 ```bash
-python train_ur5_reach.py \
-  --algo ppo \
-  --run-name ur5_ppo_main \
-  --total-timesteps 1500000
+python train_ur5_reach.py --algo sac --run-name ur5_sac_main --test --model best --episodes 1 --render-mode human
+python train_ur5_reach.py --algo sac --run-name ur5_sac_main --test --model final --episodes 1 --render-mode human
 ```
 
-## Warp Training
+关键规则：
 
-### Warp SAC
+- `--model best|final` 由代码自动解析模型目录
+- `--render-mode` 只接受 `none` 或 `human`
+- 测试时不需要再手写 `--model-path` 或 `--normalize-path`
+
+## Warp Pipeline
+
+Warp 训练入口是 [train_ur5_reach_warp.py](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/train_ur5_reach_warp.py)。
+
+支持算法：
+
+- `sac`
+- `ppo`
+
+训练示例：
 
 ```bash
-python train_ur5_reach_warp.py \
-  --algo sac \
-  --run-name ur5_warp_sac \
-  --num-envs 256 \
-  --num-timesteps 5000000
+python train_ur5_reach_warp.py --algo sac --run-name ur5_warp_sac --num-envs 256 --num-timesteps 5000000
+python train_ur5_reach_warp.py --algo ppo --run-name ur5_warp_ppo --num-envs 256 --num-timesteps 5000000
 ```
 
-### Warp PPO
+当前约定：
 
-```bash
-python train_ur5_reach_warp.py \
-  --algo ppo \
-  --run-name ur5_warp_ppo \
-  --num-envs 256 \
-  --num-timesteps 5000000
-```
+- 本地仓库先只维护 Warp 训练入口
+- Warp 测试留到服务器环境执行
+- Warp 线也统一写入 `best_model/` 和 `final_model/`
 
-## Spectator Mode
+补充说明：
 
-`--spectator-render` 用于在训练保持无头并行时，额外在主进程启动一个独立窗口进行旁观。
+- Brax 公共训练接口当前稳定暴露的是“最终参数”
+- 因此 Warp 线当前会把 `best_model/` 先镜像为最终导出，保证目录结构统一
+- 后续若服务器训练链路能拿到独立最佳参数，再把这一层替换成真实 best export
 
-示例：
+## Artifact Layout
 
-```bash
-python train_ur5_reach.py \
-  --algo sac \
-  --run-name ur5_sac_watch \
-  --n-envs 4 \
-  --spectator-render
-```
+所有训练产物都放在仓库内相对路径，并按作用域、训练线、算法和实验名区分。
 
-相关参数：
-
-- `--spectator-render-every 200`：控制旁观窗口的更新间隔。
-- `--no-spectator-deterministic`：旁观环境使用随机动作而不是确定性动作。
-
-与 `--render-training` 的区别：
-
-- `--render-training` 直接渲染训练环境本体，因此会退回单进程环境或 `DummyVecEnv`。
-- `--spectator-render` 保持训练环境无头并行，窗口来自主进程中的独立旁观环境。
-
-## Evaluation
-
-### 测试最佳模型
-
-```bash
-python train_ur5_reach.py \
-  --algo sac \
-  --run-name ur5_sac_main \
-  --test \
-  --episodes 5 \
-  --render
-```
-
-### 打印奖励分解
-
-```bash
-python train_ur5_reach.py \
-  --algo td3 \
-  --run-name ur5_td3_main \
-  --test \
-  --episodes 2 \
-  --print-reward-terms
-```
-
-## Warp 测试命令
-
-```bash
-python test_ur5_reach_warp.py \
-  --algo sac \
-  --run-name ur5_warp_sac \
-  --episodes 3 \
-  --render
-```
-
-## Artifacts
-
-所有训练产物都保存在仓库内相对路径，并按训练线、算法和实验名区分：
+主线：
 
 ```text
 runs/{local|server}/main/{algo}/{run_name}/
@@ -268,159 +129,80 @@ runs/{local|server}/main/{algo}/{run_name}/
   best_model/
     best_model.zip
     vec_normalize.pkl
-  final/
+  final_model/
     final_model.zip
     vec_normalize.pkl
   interrupted/
     interrupted_model.zip
     vec_normalize.pkl
+  final_eval.json
 ```
 
-Warp 训练线写入：
+Warp 线：
 
 ```text
 runs/{local|server}/warp/{algo}/{run_name}/
   config.json
   checkpoints/
-  final_policy.msgpack
+  best_model/
+    best_policy.msgpack
+  final_model/
+    final_policy.msgpack
+  final_eval.json
 ```
 
 说明：
 
-- 本地开发机默认写入 `runs/local/...`。
-- 服务器训练机默认写入 `runs/server/...`。
-- 如需手动覆盖，可设置环境变量 `UR5_ARTIFACT_SCOPE=local` 或 `UR5_ARTIFACT_SCOPE=server`。
-
-## Algorithms
-
-主线保留以下算法：
-
-- `td3`
-- `sac`
-- `ppo`
-
-Warp 训练线当前提供：
-
-- `sac`
-- `ppo`
-
-项目范围只保留 `UR5` 到点任务，不包含其他机器人任务分支。
+- Windows 默认写入 `runs/local/...`
+- Linux 服务器默认写入 `runs/server/...`
+- 可用 `UR5_ARTIFACT_SCOPE=local` 或 `UR5_ARTIFACT_SCOPE=server` 手动覆盖
 
 ## Task Semantics
 
-- 成功判定使用“两个指尖中点”作为末端参考点，而不是 `ee_link` 原点。
-- 主线里的参考点由 `left_follower_link` 和 `right_follower_link` 的中点构成；Warp 线保持相同定义。
-- 目标相对位置统一定义为 `target_position - finger_center`，观测前 3 维、距离奖励和成功判定都使用这一参考系。
-- 成功条件本质上是欧氏距离不大于当前阶段的成功阈值。
-- 目标球本身不再被碰撞白名单忽略，因此机器人碰到目标球也会进入碰撞惩罚逻辑。
+- 成功判定统一使用两个指尖 body 中点，而不是 `ee_link` 原点
+- 相对位置统一定义为 `target_position - finger_center`
+- 目标球本身也会参与碰撞惩罚，不再被白名单忽略
+- 主线课程学习按回合阶段走 `fixed -> local_random -> full_random`
+- Warp 线当前仍使用显式采样模式：`fixed`、`small_random`、`full_random`
 
-## Logging
+## Logging And Final Eval
 
-- 主线训练会在开始时打印观测向量每一段的真实含义，便于直接对照 `obs` 的切片语义。
-- 主线训练中的 `[train_step]` 会持续输出相对距离、相对速度、累计成功次数、当前回合回报和碰撞计数。
-- 主线训练中的 `[episode_end]` 会在并行环境里按稳定顺序输出，每条日志都带有 `order=` 和 `env=`，便于复盘多环境回合结束顺序。
-- Warp 训练线保留进度条，并在 Brax 回调可见的粒度上输出聚合指标；它不会像主线那样拿到每个并行子环境的逐回合事件。
+主线训练会输出：
 
-## Documentation
+- `observation_schema`
+- `[train_step]`：相对距离、相对速度、累计成功次数、当前回合回报、碰撞计数
+- `[episode_end]`：并行环境单回合摘要，按稳定顺序打印
+- `[final_eval]`：`min_distance`、`max_return`、`successes`、`success_rate`
 
-Recommended reading order for the main pipeline:
+Warp 训练会输出：
 
-1. [ur5_reach_config.py](/home/zzyfan/mujoco_ur5_rl/ur5_reach_config.py)
-2. [ur5_reach_env.py](/home/zzyfan/mujoco_ur5_rl/ur5_reach_env.py)
-3. [train_ur5_reach.py](/home/zzyfan/mujoco_ur5_rl/train_ur5_reach.py)
-4. [docs/IMPLEMENTATION_GUIDE.md](/home/zzyfan/mujoco_ur5_rl/docs/IMPLEMENTATION_GUIDE.md)
-5. [docs/PARAMETER_REFERENCE.md](/home/zzyfan/mujoco_ur5_rl/docs/PARAMETER_REFERENCE.md)
-6. [docs/LIBRARY_USAGE.md](/home/zzyfan/mujoco_ur5_rl/docs/LIBRARY_USAGE.md)
-7. [docs/PORTABILITY.md](/home/zzyfan/mujoco_ur5_rl/docs/PORTABILITY.md)
-8. [notebooks/01_code_learning_walkthrough.ipynb](/home/zzyfan/mujoco_ur5_rl/notebooks/01_code_learning_walkthrough.ipynb)
-9. [notebooks/02_parameter_reference.ipynb](/home/zzyfan/mujoco_ur5_rl/notebooks/02_parameter_reference.ipynb)
-10. [notebooks/04_cli_parameter_guide.ipynb](/home/zzyfan/mujoco_ur5_rl/notebooks/04_cli_parameter_guide.ipynb)
-11. [notebooks/05_library_usage_guide.ipynb](/home/zzyfan/mujoco_ur5_rl/notebooks/05_library_usage_guide.ipynb)
+- 训练进度条
+- `[warp_step]`：Brax 聚合指标
+- `[warp_episode]`：训练期可见的回合聚合摘要
+- `[final_eval]`：训练结束后的成功率、成功次数、最小距离和最大回报摘要
 
-Recommended reading order for the Warp pipeline:
+说明：
 
-1. [warp_ur5_config.py](/home/zzyfan/mujoco_ur5_rl/warp_ur5_config.py)
-2. [warp_ur5_runtime.py](/home/zzyfan/mujoco_ur5_rl/warp_ur5_runtime.py)
-3. [warp_ur5_env.py](/home/zzyfan/mujoco_ur5_rl/warp_ur5_env.py)
-4. [train_ur5_reach_warp.py](/home/zzyfan/mujoco_ur5_rl/train_ur5_reach_warp.py)
-5. [test_ur5_reach_warp.py](/home/zzyfan/mujoco_ur5_rl/test_ur5_reach_warp.py)
-6. [docs/WARP_IMPLEMENTATION_GUIDE.md](/home/zzyfan/mujoco_ur5_rl/docs/WARP_IMPLEMENTATION_GUIDE.md)
-7. [docs/WARP_PARAMETER_REFERENCE.md](/home/zzyfan/mujoco_ur5_rl/docs/WARP_PARAMETER_REFERENCE.md)
-8. [notebooks/03_warp_code_learning_walkthrough.ipynb](/home/zzyfan/mujoco_ur5_rl/notebooks/03_warp_code_learning_walkthrough.ipynb)
+- 主线最终评估来自显式测试回合
+- Warp 线当前最终评估来自 Brax 训练评估流汇总，方便在服务器训练完成时直接输出统一摘要
 
-## Notes
+## Docs And Notes
 
-- 主线与 Warp 线都使用同一套 UR5 模型文件。
-- 主线训练默认保存到 `./logs` 与 `./models`。
-- Warp 线训练默认保存到 `./warp_runs/{algo}/{run_name}`。
+推荐阅读顺序：
 
-=======
-- `docs/TRAINING_GUIDE.md`：训练与参数速查
-- `notebooks/`：教学笔记（使用步骤 + 代码/库学习）
+1. [ur5_reach_config.py](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/ur5_reach_config.py)
+2. [ur5_reach_env.py](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/ur5_reach_env.py)
+3. [train_ur5_reach.py](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/train_ur5_reach.py)
+4. [warp_ur5_config.py](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/warp_ur5_config.py)
+5. [warp_ur5_env.py](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/warp_ur5_env.py)
+6. [train_ur5_reach_warp.py](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/train_ur5_reach_warp.py)
+7. [TRAINING_GUIDE.md](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/docs/TRAINING_GUIDE.md)
+8. [01_ur5_reach_tutorial.ipynb](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/notebooks/01_ur5_reach_tutorial.ipynb)
+9. [02_codebase_library_notes.ipynb](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/notebooks/02_codebase_library_notes.ipynb)
+10. [03_main_and_warp_design_notes.ipynb](/f:/mujoco_rl_ur5-main/mujoco_rl_ur5/notebooks/03_main_and_warp_design_notes.ipynb)
 
-## 快速开始（主线）
+补充说明：
 
-### 1) 训练
-
-```bash
-python train_ur5_reach.py --algo td3 --total-timesteps 1500000
-python train_ur5_reach.py --algo sac --total-timesteps 1500000
-python train_ur5_reach.py --algo ppo --total-timesteps 1500000
-```
-
-### 2) 训练时渲染
-
-```bash
-python train_ur5_reach.py --algo td3 --total-timesteps 1500000 --render-mode human
-```
-
-### 3) 测试与渲染
-
-```bash
-python train_ur5_reach.py --algo td3 --test --episodes 1 --render-mode human
-```
-
-## 快速开始（Warp 线）
-
-```bash
-python train_ur5_reach_warp.py --algo sac --num-envs 256 --num-timesteps 5000000
-python train_ur5_reach_warp.py --algo ppo --num-envs 256 --num-timesteps 5000000
-```
-
-## 训练产物位置
-
-主线训练产物：
-- `./logs/best_model/`（最佳模型）
-- `./models/{algo}_ur5_final`（训练结束模型）
-- `./models/vec_normalize.pkl`（归一化参数）
-
-Warp 线训练产物：
-- `./warp_runs/{algo}/{run_name}/`（含 `final_policy.msgpack`）
-
-## 常用参数说明（主线）
-
-- `--algo`：`td3` / `sac` / `ppo`
-- `--total-timesteps`：训练总步数
-- `--n-envs`：并行环境数
-- `--render-mode`：`none` / `human`
-- `--render-every`：训练渲染间隔
-- `--device`：`auto` / `cpu` / `cuda`
-
-## 常用参数说明（Warp 线）
-
-- `--algo`：`sac` / `ppo`
-- `--num-timesteps`：训练总步数
-- `--num-envs`：并行训练环境数
-- `--num-eval-envs`：并行评估环境数
-- `--learning-rate`：学习率
-
-## 教学笔记
-
-- 使用步骤笔记：`notebooks/01_ur5_reach_tutorial.ipynb`
-- 代码/库学习笔记：`notebooks/02_codebase_library_notes.ipynb`
-
-## 说明
-
-- 主线与 Warp 线使用同一套 UR5 模型文件。
-- 渲染模式使用 Gymnasium 官方命名：`render_mode="human"`。
->>>>>>> fa46e0e (Add learning notebooks and expand inline comments)
+- `01_ur5_reach_tutorial.ipynb` 更偏命令和使用流程
+- `02_codebase_library_notes.ipynb` 更偏 Python / 库用法
+- `03_main_and_warp_design_notes.ipynb` 专门解释主线 class 和 Warp 两条线的代码设计思路，尤其重点讲奖励机制设计

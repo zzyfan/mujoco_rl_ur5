@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 主线训练与测试入口（zero-arm 风格重写）。
+# 主线训练与测试入口。
 #
 # 本模块负责 UR5 到点任务的命令行解析、环境构建、算法初始化、
 # 回调注册、模型保存和测试流程。
@@ -13,24 +13,36 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import signal
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import torch.nn as nn
 from stable_baselines3 import PPO, SAC, TD3
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, StopTrainingOnRewardThreshold
+from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
-from stable_baselines3.common.monitor import Monitor
 
+from ur5_reach_config import (
+    RLTrainConfig,
+    UR5ReachEnvConfig,
+    build_run_paths,
+    ensure_run_directories,
+    save_run_configuration,
+)
 from ur5_reach_env import UR5ReachEnv
 
 
 def _model_class(algo: str):
+    # 根据算法名字返回对应的 SB3 模型类。
+    #
+    # 这一步把字符串参数和真实 Python 类解耦，后面训练和测试都复用这个映射。
     mapping = {"td3": TD3, "sac": SAC, "ppo": PPO}
     if algo not in mapping:
         raise ValueError(f"不支持的算法: {algo}")
@@ -38,149 +50,170 @@ def _model_class(algo: str):
 
 
 class SaveVecNormalizeCallback(BaseCallback):
-    # 在保存最佳模型时同时保存 VecNormalize 参数。
-    def __init__(self, eval_callback: EvalCallback, verbose: int = 0) -> None:
+    # 在 best model 更新时同步保存 VecNormalize 参数。
+    #
+    # 训练时如果启用了观测归一化或奖励归一化，模型文件本身并不包含这些统计量，
+    # 所以这里需要和最佳模型一起额外保存一份。
+
+    def __init__(self, eval_callback: EvalCallback, normalize_path: Path, verbose: int = 0) -> None:
+        # `eval_callback` 负责告诉我们“当前 best reward 是多少”，
+        # `normalize_path` 负责告诉我们“最佳统计量保存到哪里”。
         super().__init__(verbose=verbose)
         self.eval_callback = eval_callback
+        self.normalize_path = normalize_path
         self.best_mean_reward = -np.inf
 
     def _on_step(self) -> bool:
-        # 检查是否有新的最佳模型。
+        # 每一步都检查一次最佳评估回报是否刷新。
+        # 一旦刷新，就把当前 VecNormalize 统计量落盘。
         if self.eval_callback.best_mean_reward > self.best_mean_reward:
             self.best_mean_reward = self.eval_callback.best_mean_reward
-            if self.verbose > 0:
-                print("保存与最佳模型对应的 VecNormalize 参数")
-            os.makedirs("./logs/best_model", exist_ok=True)
             vec_env = self.model.get_vec_normalize_env()
             if vec_env is not None:
-                vec_env.save("./logs/best_model/vec_normalize.pkl")
+                vec_env.save(str(self.normalize_path))
+                if self.verbose > 0:
+                    print(f"已同步保存最佳 VecNormalize 参数: {self.normalize_path}")
         return True
 
 
 class ManualInterruptCallback(BaseCallback):
-    # 允许手动中断训练并保存模型的回调函数。
-    def __init__(self, algo: str, verbose: int = 0) -> None:
+    # 在用户按下 Ctrl+C 时保存中断模型。
+    #
+    # 这个回调的作用是让长时间训练在手动停止时也能保留当前进度。
+
+    def __init__(self, model_path: Path, normalize_path: Path, verbose: int = 0) -> None:
+        # 这里把输出路径保存下来，并且注册 SIGINT 处理函数。
         super().__init__(verbose=verbose)
-        self.algo = algo
+        self.model_path = model_path
+        self.normalize_path = normalize_path
         self.interrupted = False
         signal.signal(signal.SIGINT, self._signal_handler)
 
     def _signal_handler(self, sig, frame) -> None:
         del sig, frame
-        print("\n接收到中断信号，正在保存模型...")
+        # 用户按 Ctrl+C 时，不直接粗暴退出，而是先保存模型和归一化参数。
+        print("\n收到 Ctrl+C，正在保存中断模型...")
         self.interrupted = True
-        self._save_model()
-        print("模型已保存，退出程序")
+        self._save_checkpoint()
         raise SystemExit(0)
 
-    def _save_model(self) -> None:
+    def _save_checkpoint(self) -> None:
+        # 这里保存两类东西：
+        # 1. 模型参数
+        # 2. 观测/奖励归一化统计量
         if self.model is None:
             return
-        os.makedirs("./models/interrupted", exist_ok=True)
-        self.model.save(f"./models/interrupted/{self.algo}_ur5_interrupted")
-        env = self.model.get_vec_normalize_env()
-        if env is not None:
-            env.save("./models/interrupted/vec_normalize.pkl")
-        print("已保存中断时的模型和参数到 ./models/interrupted/")
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+        self.model.save(str(self.model_path))
+        vec_env = self.model.get_vec_normalize_env()
+        if vec_env is not None:
+            vec_env.save(str(self.normalize_path))
+        print(f"中断模型已保存到: {self.model_path}")
 
     def _on_step(self) -> bool:
         return not self.interrupted
 
 
 class TrainRenderCallback(BaseCallback):
-    # 训练时按频率触发环境渲染。
-    def __init__(self, render_every: int = 1, render_index: int = 0, verbose: int = 0) -> None:
+    # 训练时定期渲染一个向量化环境实例。
+
+    def __init__(self, render_every: int, verbose: int = 0) -> None:
+        # `render_every` 控制渲染频率，避免每一步都渲染导致训练极慢。
         super().__init__(verbose=verbose)
-        self.render_every = max(1, int(render_every))
-        self.render_index = int(render_index)
+        self.render_every = max(int(render_every), 1)
         self.render_failed = False
 
     def _on_step(self) -> bool:
+        # 训练渲染只尝试渲染一个环境实例，而且一旦失败就永久关闭渲染，
+        # 避免图形问题让整个训练中断。
         if self.render_failed or self.n_calls % self.render_every != 0:
             return True
         try:
-            self.training_env.env_method("render", indices=self.render_index)
+            self.training_env.env_method("render", indices=0)
         except Exception as exc:
             self.render_failed = True
-            print(f"训练渲染失败，后续将关闭训练渲染: {exc}")
+            print(f"训练渲染失败，后续关闭渲染: {exc}")
         return True
 
 
-class EpisodeLogCallback(BaseCallback):
-    # 每回合输出：碰撞次数、成功次数、平均距离、最小距离、平均速度
-    def __init__(self, verbose: int = 0) -> None:
-        super().__init__(verbose=verbose)
-        self._collision_counts = None  # 每回合碰撞次数统计
-        self._success_counts = None  # 每回合成功次数统计
-        self._sum_distance = None  # 累积距离（用于平均距离）
-        self._min_distance = None  # 最小距离
-        self._sum_speed = None  # 累积速度（用于平均速度）
-        self._step_counts = None  # 步数计数
+class SpectatorRenderCallback(BaseCallback):
+    # 在训练保持无头并行时，主进程额外运行一个旁观环境。
+    #
+    # 这和 `--render-training` 的区别是：
+    # - 训练环境本体仍然可以使用多并行。
+    # - 可视化环境是主进程中的独立环境，只负责展示当前策略效果。
 
-    def _init_arrays(self, n_envs: int) -> None:
-        self._collision_counts = np.zeros(n_envs, dtype=np.int32)  # 初始化碰撞计数
-        self._success_counts = np.zeros(n_envs, dtype=np.int32)  # 初始化成功计数
-        self._sum_distance = np.zeros(n_envs, dtype=np.float32)  # 初始化距离累积
-        self._min_distance = np.full(n_envs, np.inf, dtype=np.float32)  # 初始化最小距离
-        self._sum_speed = np.zeros(n_envs, dtype=np.float32)  # 初始化速度累积
-        self._step_counts = np.zeros(n_envs, dtype=np.int32)  # 初始化步数计数
+    def __init__(
+        self,
+        env_config: UR5ReachEnvConfig,
+        render_every: int,
+        deterministic: bool = True,
+        verbose: int = 0,
+    ) -> None:
+        # 旁观环境和训练环境不是同一个实例。
+        # 这样训练环境仍然可以保持无头多并行，而旁观环境单独显示当前策略行为。
+        super().__init__(verbose=verbose)
+        self.env_config = env_config
+        self.render_every = max(int(render_every), 1)
+        self.deterministic = bool(deterministic)
+        self.spectator_env: UR5ReachEnv | None = None
+        self.spectator_obs = None
+        self.render_failed = False
+
+    def _normalize_for_policy(self, observation: np.ndarray) -> np.ndarray:
+        # 旁观环境拿到的是原始观测，但模型训练时可能看到的是归一化后的观测，
+        # 所以这里要先把旁观观测按当前 VecNormalize 统计量做一次同样的预处理。
+        vec_env = self.model.get_vec_normalize_env()
+        if vec_env is None:
+            return observation
+        normalized = vec_env.normalize_obs(observation.copy())
+        return np.asarray(normalized, dtype=np.float32)
+
+    def _on_training_start(self) -> None:
+        # 训练开始时，单独创建一个 human 模式的环境实例用于旁观。
+        try:
+            self.spectator_env = UR5ReachEnv(config=self.env_config, render_mode="human")
+            self.spectator_obs, _info = self.spectator_env.reset(seed=12345)
+            self.spectator_env.render()
+        except Exception as exc:
+            self.render_failed = True
+            self.spectator_env = None
+            self.spectator_obs = None
+            print(f"旁观窗口启动失败，已自动关闭 spectator 模式: {exc}")
 
     def _on_step(self) -> bool:
-        infos = self.locals.get("infos", [])
-        dones = self.locals.get("dones", [])
-        n_envs = len(infos)
-        if self._collision_counts is None:
-            self._init_arrays(n_envs)
-        for idx, info in enumerate(infos):
-            if not isinstance(info, dict):
-                continue
-            if "collision" in info and bool(info["collision"]):
-                self._collision_counts[idx] += 1  # 统计碰撞
-            if "success" in info and bool(info["success"]):
-                self._success_counts[idx] += 1  # 统计成功
-            if "distance" in info:
-                try:
-                    distance = float(info["distance"])  # 当前距离
-                    self._sum_distance[idx] += distance  # 累加距离
-                    self._min_distance[idx] = min(self._min_distance[idx], distance)  # 更新最小距离
-                except (TypeError, ValueError):
-                    pass
-            if "ee_speed" in info:
-                try:
-                    self._sum_speed[idx] += float(info["ee_speed"])  # 累加速度
-                except (TypeError, ValueError):
-                    pass
-            self._step_counts[idx] += 1  # 步数累加
-            if idx < len(dones) and bool(dones[idx]):
-                steps = max(int(self._step_counts[idx]), 1)  # 防止除零
-                avg_distance = float(self._sum_distance[idx]) / steps  # 平均距离
-                avg_speed = float(self._sum_speed[idx]) / steps  # 平均速度
-                print(
-                    f"[episode] env={idx} collisions={int(self._collision_counts[idx])} "
-                    f"successes={int(self._success_counts[idx])} "
-                    f"avg_dist={avg_distance:.4f} min_dist={float(self._min_distance[idx]):.4f} "
-                    f"avg_speed={avg_speed:.4f}"
-                )
-                self._collision_counts[idx] = 0  # 清空碰撞计数
-                self._success_counts[idx] = 0  # 清空成功计数
-                self._sum_distance[idx] = 0.0  # 清空距离累积
-                self._min_distance[idx] = np.inf  # 清空最小距离
-                self._sum_speed[idx] = 0.0  # 清空速度累积
-                self._step_counts[idx] = 0  # 清空步数计数
+        # 旁观模式的单步流程：
+        # 1. 把旁观环境观测归一化
+        # 2. 用当前模型预测动作
+        # 3. 推进一步旁观环境
+        # 4. 若回合结束则自动 reset
+        if self.render_failed or self.spectator_env is None or self.n_calls % self.render_every != 0:
+            return True
+        try:
+            policy_obs = self._normalize_for_policy(np.asarray(self.spectator_obs, dtype=np.float32))
+            action, _state = self.model.predict(policy_obs, deterministic=self.deterministic)
+            next_obs, _reward, terminated, truncated, _info = self.spectator_env.step(action)
+            self.spectator_env.render()
+            if bool(terminated) or bool(truncated):
+                self.spectator_obs, _reset_info = self.spectator_env.reset()
+                self.spectator_env.render()
+            else:
+                self.spectator_obs = next_obs
+        except Exception as exc:
+            self.render_failed = True
+            print(f"旁观窗口更新失败，已自动关闭 spectator 模式: {exc}")
+            if self.spectator_env is not None:
+                self.spectator_env.close()
+                self.spectator_env = None
+                self.spectator_obs = None
         return True
 
-
-def make_training_envs(n_envs: int, render_mode: str | None) -> VecNormalize:
-    # 创建训练环境。render_mode 使用 Gymnasium 官方命名（None / "human"）。
-    # 训练过程中仅主动渲染第一个环境，避免弹出多个窗口。
-
-    def _make_env(render_mode=render_mode):
-        return UR5ReachEnv(render_mode=render_mode)
-
-    env_fns = [_make_env for _ in range(max(int(n_envs), 1))]  # 生成环境工厂列表
-    # 并行环境优先用 SubprocVecEnv（多进程），单环境时用 DummyVecEnv
-    env = SubprocVecEnv(env_fns) if len(env_fns) > 1 else DummyVecEnv(env_fns)  # 多进程/单进程切换
-    return VecNormalize(env, norm_obs=True, norm_reward=True)
+    def _on_training_end(self) -> None:
+        # 训练结束时主动关闭旁观环境，避免 viewer 句柄泄露。
+        if self.spectator_env is not None:
+            self.spectator_env.close()
+            self.spectator_env = None
+            self.spectator_obs = None
 
 
 def _safe_float(value) -> float | None:
@@ -305,17 +338,23 @@ def build_parser() -> argparse.ArgumentParser:
     # 保证“代码默认值”和“命令行默认值”始终一致。
     parser = argparse.ArgumentParser(description="UR5 reach 单线复现入口，仅保留 UR5，支持 td3 / sac / ppo。")
     
-    # 这组参数控制脚本整体行为，例如训练还是测试、产物目录名字以及是否手动指定模型。
+    # 这组参数控制脚本整体行为，例如训练还是测试、产物目录名字以及测试时选择哪一份模型。
     parser.add_argument("--algo", choices=["td3", "sac", "ppo"], default=train_defaults.algo, help="算法名称。")
     parser.add_argument("--test", action="store_true", help="切换到测试模式。")
     parser.add_argument("--run-name", type=str, default=train_defaults.run_name, help="实验名字，也是产物目录名字。")
     parser.add_argument("--seed", type=int, default=train_defaults.seed, help="随机种子。")
     parser.add_argument("--episodes", type=int, default=5, help="测试模式运行多少回合。")
     parser.add_argument("--max-steps", type=int, default=None, help="测试模式覆盖环境回合长度。")
-    parser.add_argument("--render", action="store_true", help="测试模式是否打开人类可视化窗口。")
+    parser.add_argument(
+        "--model",
+        "--model-mode",
+        dest="model_variant",
+        choices=["best", "final"],
+        default="best",
+        help="测试模式加载哪一份模型目录。推荐直接传 best 或 final。",
+    )
+    parser.add_argument("--render-mode", choices=["none", "human"], default="none", help="测试模式渲染模式。")
     parser.add_argument("--print-reward-terms", action="store_true", help="测试模式打印奖励分解。")
-    parser.add_argument("--model-path", type=str, default="", help="手动指定模型路径。")
-    parser.add_argument("--normalize-path", type=str, default="", help="手动指定 VecNormalize 路径。")
 
     # Training 组对应 `RLTrainConfig`，主要控制 SB3 算法更新和训练过程。
     train_group = parser.add_argument_group("Training")
@@ -373,95 +412,264 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_policy_kwargs(algo: str) -> dict:
-    # 自定义网络结构：Actor / Critic 使用 [512, 512, 256]。
-    # PPO 需要 pi/vf，SAC/TD3 需要 pi/qf。
-    if algo == "ppo":
-        return {"net_arch": dict(pi=[512, 512, 256], vf=[512, 512, 256]), "activation_fn": nn.ReLU}  # ReLU 激活
-    return {"net_arch": dict(pi=[512, 512, 256], qf=[512, 512, 256]), "activation_fn": nn.ReLU}  # ReLU 激活
+def build_env_config(args: argparse.Namespace) -> UR5ReachEnvConfig:
+    # 把 CLI 参数显式映射到环境配置 dataclass。
+    #
+    # 这里使用显式赋值而不是 `**vars(args)`，目的是让参数来源更直观，
+    # 也方便代码学习时逐项追踪“命令行参数 -> dataclass -> 环境实现”的链路。
+    # 这里挑出和环境定义真正相关的参数，构造出一份干净的环境配置对象。
+    return UR5ReachEnvConfig(
+        frame_skip=args.frame_skip,
+        episode_length=args.episode_length,
+        control_mode=args.control_mode,
+        joint_delta_scale=args.joint_delta_scale,
+        position_kp=args.position_kp,
+        position_kd=args.position_kd,
+        action_smoothing_alpha=args.action_smoothing_alpha,
+        curriculum_fixed_episodes=args.curriculum_fixed_episodes,
+        curriculum_local_random_episodes=args.curriculum_local_random_episodes,
+        curriculum_local_scale=args.curriculum_local_scale,
+        fixed_target_x=args.fixed_target_x,
+        fixed_target_y=args.fixed_target_y,
+        fixed_target_z=args.fixed_target_z,
+        target_x_min=args.target_x_min,
+        target_x_max=args.target_x_max,
+        target_y_min=args.target_y_min,
+        target_y_max=args.target_y_max,
+        target_z_min=args.target_z_min,
+        target_z_max=args.target_z_max,
+    )
 
 
-def train_robot_arm(
-    algo: str,
-    total_timesteps: int,
-    n_envs: int,
-    render_mode: str | None,
-    render_every: int,
-    device: str,
-) -> None:
-    print("创建机械臂环境...")  # 训练入口日志
-    if render_mode == "human" and n_envs > 1:
-        print("已开启并行训练渲染：仅显示第 1 个环境，其余环境保持无头模式")
+def build_eval_env_config(env_config: UR5ReachEnvConfig) -> UR5ReachEnvConfig:
+    # 构造评估环境配置。
+    #
+    # 评估阶段关闭课程学习，让测试始终在最终完整任务分布上进行。
+    # 通过 dataclass `replace(...)` 复制一份配置，再只覆盖课程学习相关字段。
+    return replace(env_config, curriculum_fixed_episodes=0, curriculum_local_random_episodes=0)
 
-    env = make_training_envs(n_envs=n_envs, render_mode=render_mode)  # 构造训练 VecEnv
 
-    # 设置动作噪声
-    # - TD3 使用 action noise 来提升探索
-    # - SAC 自带熵正则，不强依赖外部噪声
-    # - PPO 为 on-policy，不使用动作噪声
-    n_actions = env.action_space.shape[-1]  # 动作维度
-    action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=2.5 * np.ones(n_actions))
+def build_train_config(args: argparse.Namespace) -> RLTrainConfig:
+    # 把 CLI 参数映射到训练配置 dataclass。
+    # 这里挑出和训练流程相关的参数，和环境参数明确分开。
+    return RLTrainConfig(
+        algo=args.algo,
+        run_name=args.run_name,
+        seed=args.seed,
+        total_timesteps=args.total_timesteps,
+        n_envs=args.n_envs,
+        eval_freq=args.eval_freq,
+        eval_episodes=args.eval_episodes,
+        device=args.device,
+        learning_rate=args.learning_rate,
+        buffer_size=args.buffer_size,
+        learning_starts=args.learning_starts,
+        batch_size=args.batch_size,
+        tau=args.tau,
+        gamma=args.gamma,
+        train_freq=args.train_freq,
+        gradient_steps=args.gradient_steps,
+        policy_delay=args.policy_delay,
+        target_policy_noise=args.target_policy_noise,
+        target_noise_clip=args.target_noise_clip,
+        action_noise_sigma=args.action_noise_sigma,
+        ppo_n_steps=args.ppo_n_steps,
+        ppo_n_epochs=args.ppo_n_epochs,
+        ppo_gae_lambda=args.ppo_gae_lambda,
+        ppo_ent_coef=args.ppo_ent_coef,
+        ppo_vf_coef=args.ppo_vf_coef,
+        ppo_clip_range=args.ppo_clip_range,
+        render_training=bool(args.render_training),
+        render_every=args.render_every,
+        spectator_render=bool(args.spectator_render),
+        spectator_render_every=args.spectator_render_every,
+        spectator_deterministic=bool(args.spectator_deterministic),
+    )
 
-    policy_kwargs = build_policy_kwargs(algo)  # 按算法生成网络结构
 
-    # 创建模型
-    # 这里把各算法的关键超参写死在代码里，便于和 zero-arm 对照。
-    # 如果需要更细粒度调参，可把这些参数改为 CLI 选项。
-    model_cls = _model_class(algo)  # 选择算法类
-    if algo == "ppo":
-        model = model_cls(
-            "MlpPolicy",
-            env,
-            verbose=1,
-            device=device,
-            learning_rate=3e-4,  # Adam 学习率
-            batch_size=256,  # 每次更新的样本数
-            gamma=0.99,  # 折扣因子
-            n_steps=2048,  # rollout 长度（每次采样的步数）
-            n_epochs=10,  # 每批数据的优化轮数
-            gae_lambda=0.95,  # GAE 优势估计参数
-            ent_coef=0.0,  # 熵正则系数（探索强度）
-            vf_coef=0.5,  # 价值函数损失系数
-            clip_range=0.2,  # PPO clip 范围
-            policy_kwargs=policy_kwargs,
-        )
+def make_env_factory(env_config: UR5ReachEnvConfig, render_mode: str | None = None):
+    # 构造环境工厂函数。
+    #
+    # SB3 的向量化环境接口要求传入一个可调用对象，而不是环境实例本身，
+    # 所以这里返回一个闭包供 `make_vec_env` 延迟创建环境。
+    def _factory():
+        # 真正的环境实例会在这里被创建。
+        return UR5ReachEnv(config=env_config, render_mode=render_mode)
+    return _factory
+
+
+def make_training_env(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> VecNormalize:
+    # 创建训练环境并包一层 `VecNormalize`。
+    #
+    # 实现方式：
+    # - 有头训练时使用 `DummyVecEnv`，避免多进程窗口渲染不稳定。
+    # - 无头多并行训练时使用 `SubprocVecEnv` 提高采样吞吐。
+    # - 最外层统一包 `VecNormalize`，让模型读取的是标准化后的观测。
+    render_mode = "human" if train_config.render_training else None
+    # 如果训练过程中要直接开窗口，就退回单进程环境；
+    # 否则在多环境场景下优先用多进程向量环境。
+    vec_cls = DummyVecEnv if train_config.n_envs == 1 or train_config.render_training else SubprocVecEnv
+    env = make_vec_env(
+        make_env_factory(env_config=env_config, render_mode=render_mode),
+        n_envs=max(int(train_config.n_envs), 1),
+        seed=int(train_config.seed),
+        vec_env_cls=vec_cls,
+    )
+    # 最外层统一包一层 VecNormalize，让模型训练时总是看到处理后的观测。
+    return VecNormalize(env, norm_obs=bool(train_config.normalize_observation), norm_reward=bool(train_config.normalize_reward))
+
+
+def make_eval_env(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> VecNormalize:
+    # 创建评估环境。
+    #
+    # 评估环境固定为单环境，并关闭奖励归一化，避免评估数值被训练期统计量扭曲。
+    # 评估环境只需要单环境，目标是稳定可比，不追求采样吞吐。
+    env = make_vec_env(
+        make_env_factory(env_config=build_eval_env_config(env_config), render_mode=None),
+        n_envs=1,
+        seed=int(train_config.seed) + 10_000,
+        vec_env_cls=DummyVecEnv,
+    )
+    # 评估时仍然沿用观测归一化，但关闭 reward 归一化和 training 标记。
+    return VecNormalize(env, norm_obs=bool(train_config.normalize_observation), norm_reward=False, training=False)
+
+
+def build_policy_kwargs(train_config: RLTrainConfig) -> dict:
+    # 构造 SB3 策略网络结构描述。
+    #
+    # SB3 中：
+    # - PPO 使用 `pi` / `vf`
+    # - SAC / TD3 使用 `pi` / `qf`
+    # 因此这里根据算法族切换键名，但隐藏层结构都来自同一份训练配置。
+    if train_config.algo == "ppo":
+        # PPO 的 value 网络键名是 `vf`。
+        net_arch = dict(pi=list(train_config.actor_layers), vf=list(train_config.critic_layers))
     else:
-        # SAC 与 TD3 参数并不完全一致，这里用条件参数避免传入无效字段。
-        td3_only_kwargs = {}  # TD3 专用参数
-        if algo == "td3":
-            td3_only_kwargs = {
-                "policy_delay": 4,  # TD3 延迟更新策略网络
-                "target_policy_noise": 0.2,  # TD3 目标噪声
-                "target_noise_clip": 0.5,  # TD3 目标噪声裁剪
-            }
-        action_noise_kw = {"action_noise": action_noise} if algo == "td3" else {}  # TD3 动作噪声
-        model = model_cls(
+        # SAC / TD3 的 critic 网络键名是 `qf`。
+        net_arch = dict(pi=list(train_config.actor_layers), qf=list(train_config.critic_layers))
+    return {"net_arch": net_arch, "activation_fn": nn.ReLU}
+
+
+def build_model(train_config: RLTrainConfig, env: VecNormalize):
+    # 实例化选定算法。
+    #
+    # 这里把三类算法分开写，是为了让“每个参数最终传给了哪个库函数”一目了然。
+    # 先准备网络结构描述和当前实验的输出目录。
+    policy_kwargs = build_policy_kwargs(train_config)
+    paths = build_run_paths(train_config.algo, train_config.run_name)
+
+    if train_config.algo == "td3":
+        # TD3 需要额外的高斯动作噪声，用于连续控制下的探索。
+        action_dim = env.action_space.shape[-1]
+        action_noise = NormalActionNoise(
+            mean=np.zeros(action_dim, dtype=np.float32),
+            sigma=float(train_config.action_noise_sigma) * np.ones(action_dim, dtype=np.float32),
+        )
+        # 这里把 TD3 需要的超参数逐项显式传入，便于对照 CLI 和 dataclass。
+        return TD3(
+            "MlpPolicy",
+            env,
+            action_noise=action_noise,
+            verbose=1,
+            device=train_config.device,
+            tensorboard_log=str(paths.tensorboard_dir),
+            learning_rate=float(train_config.learning_rate),
+            buffer_size=int(train_config.buffer_size),
+            learning_starts=int(train_config.learning_starts),
+            batch_size=int(train_config.batch_size),
+            tau=float(train_config.tau),
+            gamma=float(train_config.gamma),
+            train_freq=int(train_config.train_freq),
+            gradient_steps=int(train_config.gradient_steps),
+            policy_delay=int(train_config.policy_delay),
+            target_policy_noise=float(train_config.target_policy_noise),
+            target_noise_clip=float(train_config.target_noise_clip),
+            policy_kwargs=policy_kwargs,
+            seed=int(train_config.seed),
+        )
+
+    if train_config.algo == "sac":
+        # SAC 走离策略训练，但不需要像 TD3 那样手动构造动作噪声对象。
+        # SAC 仍然需要 replay buffer、soft update 和批量更新等参数。
+        return SAC(
             "MlpPolicy",
             env,
             verbose=1,
-            device=device,
-            learning_rate=3e-4,  # Adam 学习率
-            buffer_size=3_000_000,  # 回放池容量（off-policy 必需）
-            learning_starts=10_000,  # 预热步数
-            batch_size=256,  # 每次更新的样本数
-            tau=0.005,  # 目标网络软更新系数
-            gamma=0.99,  # 折扣因子
-            train_freq=1,  # 每步更新频率
-            gradient_steps=1,  # 每次采样后更新次数
+            device=train_config.device,
+            tensorboard_log=str(paths.tensorboard_dir),
+            learning_rate=float(train_config.learning_rate),
+            buffer_size=int(train_config.buffer_size),
+            learning_starts=int(train_config.learning_starts),
+            batch_size=int(train_config.batch_size),
+            tau=float(train_config.tau),
+            gamma=float(train_config.gamma),
+            train_freq=int(train_config.train_freq),
+            gradient_steps=int(train_config.gradient_steps),
             policy_kwargs=policy_kwargs,
-            **action_noise_kw,
-            **td3_only_kwargs,
+            seed=int(train_config.seed),
         )
 
-    # 创建评估环境和回调函数
-    eval_env = make_eval_env(env)  # 评估环境
+    # PPO 是在轨策略算法，因此不使用 replay buffer、target network 等参数。
+    # PPO 走在轨训练，因此主要依赖 rollout 长度、epoch 次数和 GAE 参数。
+    return PPO(
+        "MlpPolicy",
+        env,
+        verbose=1,
+        device=train_config.device,
+        tensorboard_log=str(paths.tensorboard_dir),
+        learning_rate=float(train_config.learning_rate),
+        batch_size=int(train_config.batch_size),
+        gamma=float(train_config.gamma),
+        n_steps=int(train_config.ppo_n_steps),
+        n_epochs=int(train_config.ppo_n_epochs),
+        gae_lambda=float(train_config.ppo_gae_lambda),
+        ent_coef=float(train_config.ppo_ent_coef),
+        vf_coef=float(train_config.ppo_vf_coef),
+        clip_range=float(train_config.ppo_clip_range),
+        policy_kwargs=policy_kwargs,
+        seed=int(train_config.seed),
+    )
+
+
+def train(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> None:
+    # 执行完整训练流程并保存产物。
+    #
+    # 主要步骤：
+    # 1. 生成产物目录并保存配置。
+    # 2. 创建训练环境和评估环境。
+    # 3. 初始化算法模型。
+    # 4. 注册评估、归一化保存、中断保存和渲染回调。
+    # 5. 调用 SB3 `learn()` 开始训练。
+    # 第一步：构造路径并创建目录。
+    paths = build_run_paths(train_config.algo, train_config.run_name)
+    ensure_run_directories(paths)
+    # 第二步：先把这次实验的参数落盘，方便中途或事后复现。
+    save_run_configuration(paths, env_config, train_config)
+
+    # 第三步：创建训练环境、评估环境和模型。
+    env = make_training_env(train_config, env_config)
+    eval_env = make_eval_env(train_config, env_config)
+    model = build_model(train_config, env)
+
+    # 回调列表集中处理“评估、保存、手动中断、渲染”这几类辅助流程。
+    callbacks: list[BaseCallback] = []
+    stop_callback = None
+    if train_config.save_best_reward_threshold is not None:
+        # 如果设置了奖励阈值，最佳模型达到阈值后可以提前停训。
+        stop_callback = StopTrainingOnRewardThreshold(
+            reward_threshold=float(train_config.save_best_reward_threshold),
+            verbose=1,
+        )
+    # `EvalCallback` 负责周期性评估，并把最佳模型保存到 `best_dir`。
     eval_callback = EvalCallback(
         eval_env,
-        best_model_save_path="./logs/best_model",
-        log_path="./logs",
-        eval_freq=5000,
+        best_model_save_path=str(paths.best_dir),
+        log_path=str(paths.run_dir),
+        eval_freq=max(int(train_config.eval_freq // max(int(train_config.n_envs), 1)), 1),
+        n_eval_episodes=int(train_config.eval_episodes),
         deterministic=True,
         render=False,
+        callback_on_new_best=stop_callback,
     )
     callbacks.append(eval_callback)
     callbacks.append(SaveVecNormalizeCallback(eval_callback, paths.best_normalize_path, verbose=1))
@@ -480,113 +688,284 @@ def train_robot_arm(
             )
         )
 
-    callbacks = [
-        eval_callback,
-        save_vec_normalize_callback,
-        manual_interrupt_callback,
-        EpisodeLogCallback(verbose=1),
-    ]  # 训练回调集合
-    if render_mode == "human":
-        callbacks.append(TrainRenderCallback(render_every=render_every, render_index=0, verbose=1))
-
-    os.makedirs("./logs", exist_ok=True)  # 训练日志目录
-    os.makedirs("./models", exist_ok=True)  # 模型保存目录
-
-    print("开始训练...")  # 真正进入 learn 阶段
-    print("提示: 按 Ctrl+C 可以中途停止训练并保存最后一次模型数据")
+    print("开始训练 UR5 reach 任务")
+    print(f"algo={train_config.algo} run_dir={paths.run_dir}")
     print(
-        f"训练配置: algo={algo}, total_timesteps={total_timesteps}, n_envs={n_envs}, render_mode={render_mode}, render_every={render_every}"
+        f"config: total_timesteps={train_config.total_timesteps}, n_envs={train_config.n_envs}, "
+        f"control_mode={env_config.control_mode}, episode_length={env_config.episode_length}"
     )
+    if train_config.spectator_render and not train_config.render_training:
+        print(
+            f"spectator: enabled every={train_config.spectator_render_every} "
+            f"deterministic={train_config.spectator_deterministic}"
+        )
     start_time = time.time()
+    # 真正开始训练。`learn(...)` 内部会循环调用环境、采样数据并更新模型。
+    model.learn(total_timesteps=int(train_config.total_timesteps), callback=callbacks, log_interval=1000, progress_bar=True)
 
-    model.learn(
-        total_timesteps=int(total_timesteps),
-        callback=callbacks,
-        log_interval=1000,
-        progress_bar=True,
+    # 训练结束后再额外保存一份最终模型和最终归一化参数。
+    env.save(str(paths.final_normalize_path))
+    model.save(str(paths.final_model_path))
+    # 训练结束后再单独跑一轮最终评估，统一输出成功率、最小距离和最大回报。
+    # 这里固定测试 `final` 产物，而不是训练中途的最佳模型，回答的是“这次实验最终交付物表现如何”。
+    final_eval = evaluate_final_success_rate(
+        algo=train_config.algo,
+        run_name=train_config.run_name,
+        env_config=env_config,
+        episodes=max(int(train_config.eval_episodes), 1),
     )
+    final_eval_path = paths.run_dir / "final_eval.json"
+    final_eval_path.write_text(json.dumps(final_eval, indent=2, ensure_ascii=False), encoding="utf-8")
+    elapsed = time.time() - start_time
+    print(f"训练完成，耗时 {elapsed:.2f} 秒")
+    print(f"最终模型: {paths.final_model_path}")
+    print(f"归一化参数: {paths.final_normalize_path}")
+    print(
+        "[final_eval] "
+        f"algo={train_config.algo} success_rate={final_eval['success_rate']:.2%} "
+        f"successes={final_eval['successes']}/{final_eval['episodes']} "
+        f"min_distance={final_eval['min_distance'] if final_eval['min_distance'] is not None else float('nan'):.4f} "
+        f"max_return={final_eval['max_return']:.3f} "
+        f"avg_return={final_eval['average_return']:.3f} "
+        f"avg_steps={final_eval['average_steps']:.1f}"
+    )
+    print(f"[final_eval] saved_to={final_eval_path}")
+    env.close()
+    eval_env.close()
 
-    env.save("./models/vec_normalize.pkl")  # 保存归一化统计量
-    model.save(f"./models/{algo}_ur5_final")  # 保存最终模型
 
-    end_time = time.time()
-    print(f"训练完成，耗时: {end_time - start_time:.2f}秒")
+def resolve_test_paths(algo: str, run_name: str, model_variant: str) -> tuple[Path, Path]:
+    # 解析测试时要加载的模型路径和归一化路径。
+    #
+    # 当前测试 CLI 不再要求用户自己写完整路径，而是只传 `best` 或 `final`。
+    # 解析顺序：
+    # 1. 新目录结构下的 `best_model/` 或 `final_model/`。
+    # 2. 旧目录结构下兼容的 `best_model/` 或 `final/`。
+    paths = build_run_paths(algo, run_name)
+    scoped_legacy_best_model = paths.run_dir / "best_model" / "best_model.zip"
+    scoped_legacy_best_norm = paths.run_dir / "best_model" / "vec_normalize.pkl"
+    scoped_legacy_final_model = paths.run_dir / "final" / "final_model.zip"
+    scoped_legacy_final_norm = paths.run_dir / "final" / "vec_normalize.pkl"
+
+    legacy_run_dir = paths.project_root / "runs" / algo / run_name
+    legacy_best_model = legacy_run_dir / "best_model" / "best_model.zip"
+    legacy_best_norm = legacy_run_dir / "best_model" / "vec_normalize.pkl"
+    legacy_final_model = legacy_run_dir / "final" / "final_model.zip"
+    legacy_final_norm = legacy_run_dir / "final" / "vec_normalize.pkl"
+    legacy_final_model_dir_model = legacy_run_dir / "final_model" / "final_model.zip"
+    legacy_final_model_dir_norm = legacy_run_dir / "final_model" / "vec_normalize.pkl"
+
+    root_models_final = paths.project_root / "models" / f"{algo}_ur5_final.zip"
+    root_models_norm = paths.project_root / "models" / "vec_normalize.pkl"
+
+    if model_variant == "best":
+        if paths.best_model_path.exists():
+            resolved_model = paths.best_model_path
+        elif scoped_legacy_best_model.exists():
+            resolved_model = scoped_legacy_best_model
+        else:
+            resolved_model = legacy_best_model
+
+        if paths.best_normalize_path.exists():
+            resolved_norm = paths.best_normalize_path
+        elif scoped_legacy_best_norm.exists():
+            resolved_norm = scoped_legacy_best_norm
+        else:
+            resolved_norm = legacy_best_norm
+    else:
+        if paths.final_model_path.exists():
+            resolved_model = paths.final_model_path
+        elif scoped_legacy_final_model.exists():
+            resolved_model = scoped_legacy_final_model
+        elif legacy_final_model_dir_model.exists():
+            resolved_model = legacy_final_model_dir_model
+        elif root_models_final.exists():
+            resolved_model = root_models_final
+        else:
+            resolved_model = legacy_final_model
+
+        if paths.final_normalize_path.exists():
+            resolved_norm = paths.final_normalize_path
+        elif scoped_legacy_final_norm.exists():
+            resolved_norm = scoped_legacy_final_norm
+        elif legacy_final_model_dir_norm.exists():
+            resolved_norm = legacy_final_model_dir_norm
+        elif root_models_norm.exists():
+            resolved_norm = root_models_norm
+        else:
+            resolved_norm = legacy_final_norm
+    return resolved_model, resolved_norm
 
 
-def test_robot_arm(
+def evaluate_final_success_rate(
     algo: str,
-    model_path: str,
-    normalize_path: str,
-    num_episodes: int,
-) -> None:
-    print("加载模型并测试...")  # 测试入口日志
-
-    env = DummyVecEnv([lambda: UR5ReachEnv(render_mode="human")])
-    if os.path.exists(normalize_path):
-        env = VecNormalize.load(normalize_path, env)
+    run_name: str,
+    env_config: UR5ReachEnvConfig,
+    episodes: int,
+) -> dict[str, float | int | None]:
+    # 训练结束后单独跑一轮确定性评估，统一输出最终成功率统计。
+    #
+    # 这里固定加载 `final_model/` 下的最终产物，避免把“最佳中间模型”和“最终交付模型”
+    # 混在一起。输出口径和 Warp 线保持一致：最小距离、最大回报、成功次数、成功率。
+    resolved_model, resolved_norm = resolve_test_paths(algo, run_name, "final")
+    eval_config = build_eval_env_config(env_config)
+    env = make_vec_env(
+        make_env_factory(eval_config, render_mode=None),
+        n_envs=1,
+        seed=9876,
+        vec_env_cls=DummyVecEnv,
+    )
+    if resolved_norm.exists():
+        env = VecNormalize.load(str(resolved_norm), env)
         env.training = False
         env.norm_reward = False
 
-    model = _model_class(algo).load(model_path, env=env)
-    episode_rewards: list[float] = []
+    model = _model_class(algo).load(str(resolved_model), env=env)
+    successes = 0
+    episode_returns: list[float] = []
+    episode_lengths: list[int] = []
+    min_distance = float("inf")
 
-    for episode in range(max(int(num_episodes), 1)):
-        obs = env.reset()
+    for _ in range(max(int(episodes), 1)):
+        observation = env.reset()
+        done = np.array([False], dtype=bool)
         total_reward = 0.0
-
-        for step in range(int(UR5ReachEnv.EPISODE_LENGTH)):
-            action, _states = model.predict(obs, deterministic=True)
-            obs, reward, done, _info = env.step(action)
+        step = 0
+        episode_success = False
+        while not bool(done[0]) and step < int(eval_config.episode_length):
+            action, _ = model.predict(observation, deterministic=True)
+            observation, reward, done, info = env.step(action)
             reward_value = float(reward[0]) if isinstance(reward, np.ndarray) else float(reward)
             total_reward += reward_value
-            time.sleep(0.01)  # 控制渲染频率，防止窗口卡顿
-            env.render()  # human 渲染窗口刷新
-            if bool(done):
-                print(f"Episode {episode + 1} finished after {step + 1} timesteps")
-                print(f"Episode reward: {total_reward:.3f}")
-                episode_rewards.append(total_reward)
-                break
+            step += 1
+            info0 = info[0] if isinstance(info, (list, tuple)) and info else {}
+            distance = float(info0.get("relative_distance", info0.get("distance", np.inf)))
+            min_distance = min(min_distance, distance)
+            if bool(done[0]):
+                episode_success = bool(info0.get("success"))
+        successes += int(episode_success)
+        episode_returns.append(total_reward)
+        episode_lengths.append(step)
 
     env.close()
-    if episode_rewards:
-        print(f"Average reward over {len(episode_rewards)} episodes: {float(np.mean(episode_rewards)):.3f}")
+    total_episodes = max(int(episodes), 1)
+    return {
+        "episodes": total_episodes,
+        "successes": int(successes),
+        "success_rate": float(successes) / float(total_episodes),
+        "average_return": float(np.mean(episode_returns)) if episode_returns else 0.0,
+        "max_return": float(np.max(episode_returns)) if episode_returns else 0.0,
+        "average_steps": float(np.mean(episode_lengths)) if episode_lengths else 0.0,
+        "min_distance": float(min_distance) if np.isfinite(min_distance) else None,
+    }
+
+
+def test(
+    algo: str,
+    run_name: str,
+    env_config: UR5ReachEnvConfig,
+    model_variant: str,
+    episodes: int,
+    max_steps: int | None,
+    render_mode: str,
+    print_reward_terms: bool,
+) -> None:
+    # 加载训练好的主线模型并执行测试回合。
+    #
+    # 这里会自动处理两件事：
+    # 1. 加载 VecNormalize 统计量，让测试时的观测分布和训练保持一致。
+    # 2. 复用环境 `info` 中的调试信息，按需打印奖励分解。
+    # 第一步：解析要加载的模型文件和归一化文件。
+    resolved_model, resolved_norm = resolve_test_paths(algo, run_name, model_variant)
+    if not resolved_model.exists():
+        raise FileNotFoundError(f"模型不存在: {resolved_model}")
+
+    # 第二步：构造测试环境配置。
+    eval_config = build_eval_env_config(env_config)
+    if max_steps is not None:
+        # 如果 CLI 显式指定了最大步数，就只覆盖 episode_length，不改其他环境参数。
+        eval_config = replace(eval_config, episode_length=max(int(max_steps), 1))
+
+    # 测试环境固定为单环境，避免日志输出和渲染被多并行干扰。
+    env = make_vec_env(
+        make_env_factory(eval_config, render_mode=None if render_mode == "none" else render_mode),
+        n_envs=1,
+        seed=123,
+        vec_env_cls=DummyVecEnv,
+    )
+    if resolved_norm.exists():
+        # 如果训练时用过 VecNormalize，这里必须一起加载，否则策略看到的观测分布会变。
+        env = VecNormalize.load(str(resolved_norm), env)
+        env.training = False
+        env.norm_reward = False
+        print(f"已加载 VecNormalize: {resolved_norm}")
+
+    # 第三步：按算法类型加载模型对象。
+    model = _model_class(algo).load(str(resolved_model), env=env)
+    print(f"已加载模型: {resolved_model}")
+
+    # 第四步：循环执行若干测试回合，并按需打印 reward 分解。
+    for episode_index in range(max(int(episodes), 1)):
+        observation = env.reset()
+        done = np.array([False], dtype=bool)
+        total_reward = 0.0
+        step = 0
+        while not bool(done[0]) and step < int(eval_config.episode_length):
+            # 测试阶段固定使用确定性动作，方便比较不同实验。
+            action, _ = model.predict(observation, deterministic=True)
+            observation, reward, done, info = env.step(action)
+            if render_mode == "human":
+                env.render()
+            step += 1
+            reward_value = float(reward[0]) if isinstance(reward, np.ndarray) else float(reward)
+            total_reward += reward_value
+            info0 = info[0] if isinstance(info, (list, tuple)) and info else {}
+            if print_reward_terms:
+                # `reward_terms` 来自环境 `info`，可以直接帮助分析策略当前主要吃的是哪一项奖励。
+                print(
+                    f"[episode {episode_index + 1} step {step}] reward={reward_value:.4f} "
+                    f"distance={float(info0.get('distance', 0.0)):.4f} done_reason={info0.get('done_reason', 'running')}"
+                )
+                if isinstance(info0.get("reward_terms"), dict):
+                    print(f"  reward_terms={info0['reward_terms']}")
+        info0 = info[0] if isinstance(info, (list, tuple)) and info else {}
+        print(
+            f"Episode {episode_index + 1}: steps={step}, total_reward={total_reward:.3f}, "
+            f"distance={float(info0.get('distance', 0.0)):.4f}, done_reason={info0.get('done_reason', 'unknown')}"
+        )
+    env.close()
+    if render_mode == "human":
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train or test UR5 with TD3/SAC/PPO (zero-arm style)")
-    parser.add_argument("--algo", choices=["td3", "sac", "ppo"], default="td3", help="训练算法")  # algo 选择
-    parser.add_argument("--test", action="store_true", help="测试已训练模型")  # 只跑测试
-    parser.add_argument("--model-path", type=str, default="./models/td3_ur5_final", help="测试模型路径")  # 模型路径
-    parser.add_argument("--normalize-path", type=str, default="./models/vec_normalize.pkl", help="归一化参数路径")  # VecNormalize
-    parser.add_argument("--episodes", type=int, default=10, help="测试回合数")  # 测试回合数
-    parser.add_argument("--total-timesteps", type=int, default=5_000_000, help="训练步数")  # 训练总步数
-    parser.add_argument("--n-envs", type=int, default=1, help="并行环境数")  # 并行环境数
-    parser.add_argument(
-        "--render-mode",
-        choices=["none", "human"],
-        default="none",
-        help="训练渲染模式（符合 Gymnasium 官方命名）",
-    )  # 训练渲染模式
-    parser.add_argument("--render-every", type=int, default=1, help="训练渲染刷新间隔")  # 训练渲染频率
-    parser.add_argument("--device", type=str, default="auto", help="训练设备，例如 auto/cpu/cuda")  # 训练设备
-
+    # 主线脚本入口。
+    #
+    # 入口职责很简单：
+    # - 先解析参数
+    # - 再构造环境配置
+    # - 最后根据 `--test` 在训练和测试之间分流
+    # 先解析 CLI，再构造环境配置。
+    parser = build_parser()
     args = parser.parse_args()
+    env_config = build_env_config(args)
     if args.test:
-        test_robot_arm(
+        # 带 `--test` 时走测试分支，不进入训练流程。
+        test(
             algo=args.algo,
-            model_path=args.model_path,
-            normalize_path=args.normalize_path,
-            num_episodes=args.episodes,
+            run_name=args.run_name,
+            env_config=env_config,
+            model_variant=args.model_variant,
+            episodes=args.episodes,
+            max_steps=args.max_steps,
+            render_mode=args.render_mode,
+            print_reward_terms=bool(args.print_reward_terms),
         )
-    else:
-        train_robot_arm(
-            algo=args.algo,
-            total_timesteps=args.total_timesteps,
-            n_envs=args.n_envs,
-            render_mode=None if args.render_mode == "none" else args.render_mode,
-            render_every=args.render_every,
-            device=args.device,
-        )
+        return
+    # 默认走训练分支。
+    train(build_train_config(args), env_config)
 
 
 if __name__ == "__main__":

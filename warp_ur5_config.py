@@ -209,6 +209,23 @@ class WarpTrainConfig:
     dry_run: bool = False
 
 
+@dataclass
+class WarpRunPaths:
+    # Warp 训练产物路径集合。
+    #
+    # 和主线一样，把 run_dir 下的重要文件夹和文件都集中起来，
+    # 这样训练脚本、测试脚本和文档都可以共用一套路径约定。
+    project_root: Path
+    run_dir: Path
+    best_dir: Path
+    final_dir: Path
+    checkpoint_dir: Path
+    config_path: Path
+    best_policy_path: Path
+    final_policy_path: Path
+    final_eval_path: Path
+
+
 def project_root() -> Path:
     # 返回仓库根目录，不依赖调用时的当前工作目录。
     return Path(__file__).resolve().parent
@@ -233,6 +250,28 @@ def build_warp_run_dir(algo: str, run_name: str) -> Path:
     # Warp 训练线统一保存到 `runs/{local|server}/warp/{algo}/{run_name}`。
     # 路径结构和主线保持同一风格，只是训练线名从 `main` 换成 `warp`。
     return project_root() / "runs" / artifact_scope() / "warp" / algo / run_name
+
+
+def build_warp_run_paths(algo: str, run_name: str) -> WarpRunPaths:
+    # 构造 Warp 实验完整产物路径。
+    #
+    # Warp 线现在也统一使用显式的 `best_model/` 和 `final_model/`，
+    # 这样测试阶段只需要传 `best` 或 `final`，不必手写完整文件路径。
+    run_dir = build_warp_run_dir(algo, run_name)
+    best_dir = run_dir / "best_model"
+    final_dir = run_dir / "final_model"
+    checkpoint_dir = run_dir / "checkpoints"
+    return WarpRunPaths(
+        project_root=project_root(),
+        run_dir=run_dir,
+        best_dir=best_dir,
+        final_dir=final_dir,
+        checkpoint_dir=checkpoint_dir,
+        config_path=run_dir / "config.json",
+        best_policy_path=best_dir / "best_policy.msgpack",
+        final_policy_path=final_dir / "final_policy.msgpack",
+        final_eval_path=run_dir / "final_eval.json",
+    )
 
 
 def save_warp_configuration(run_dir: Path, env_config: WarpUR5EnvConfig, train_config: WarpTrainConfig, runtime: str) -> None:
