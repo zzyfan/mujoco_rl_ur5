@@ -140,17 +140,10 @@ def train_robot_arm(
     device: str,
 ) -> None:
     print("创建机械臂环境...")  # 训练入口日志
-<<<<<<< HEAD
-    if render and n_envs > 1:
-        print("已开启并行训练渲染：仅显示第 1 个环境，其余环境保持无头模式")
-
-    env = make_training_envs(n_envs=n_envs, render=render)  # 构造训练 VecEnv
-=======
     if render_mode == "human" and n_envs > 1:
         print("已开启并行训练渲染：仅显示第 1 个环境，其余环境保持无头模式")
 
     env = make_training_envs(n_envs=n_envs, render_mode=render_mode)  # 构造训练 VecEnv
->>>>>>> fa46e0e (Add learning notebooks and expand inline comments)
 
     # 设置动作噪声
     # - TD3 使用 action noise 来提升探索
@@ -217,11 +210,7 @@ def train_robot_arm(
     manual_interrupt_callback = ManualInterruptCallback(algo=algo, verbose=1)
 
     callbacks = [eval_callback, save_vec_normalize_callback, manual_interrupt_callback]  # 训练回调集合
-<<<<<<< HEAD
-    if render:
-=======
     if render_mode == "human":
->>>>>>> fa46e0e (Add learning notebooks and expand inline comments)
         callbacks.append(TrainRenderCallback(render_every=render_every, render_index=0, verbose=1))
 
     os.makedirs("./logs", exist_ok=True)  # 训练日志目录
@@ -296,16 +285,12 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=10, help="测试回合数")  # 测试回合数
     parser.add_argument("--total-timesteps", type=int, default=5_000_000, help="训练步数")  # 训练总步数
     parser.add_argument("--n-envs", type=int, default=1, help="并行环境数")  # 并行环境数
-<<<<<<< HEAD
-    parser.add_argument("--render", action="store_true", help="训练时打开人类可视化窗口")  # 训练渲染开关
-=======
     parser.add_argument(
         "--render-mode",
         choices=["none", "human"],
         default="none",
         help="训练渲染模式（符合 Gymnasium 官方命名）",
     )  # 训练渲染模式
->>>>>>> fa46e0e (Add learning notebooks and expand inline comments)
     parser.add_argument("--render-every", type=int, default=1, help="训练渲染刷新间隔")  # 训练渲染频率
     parser.add_argument("--device", type=str, default="auto", help="训练设备，例如 auto/cpu/cuda")  # 训练设备
 
