@@ -248,7 +248,7 @@ class DetailedTrainLogCallback(BaseCallback):
         self._train_step_log_every = max(int(train_step_log_every), 1)
 
     def _on_training_start(self) -> None:
-        print("observation_schema:")
+        print("[observation_schema]")
         for obs_slice, name, meaning in UR5ReachEnv.observation_schema():
             print(f"  {obs_slice} {name}: {meaning}")
 
@@ -302,9 +302,10 @@ class DetailedTrainLogCallback(BaseCallback):
         if self.n_calls % self._train_step_log_every == 0:
             print(
                 f"[train_step] env_steps={self.num_timesteps} episode={representative_episode} "
-                f"step={representative_step} rel_dist_mean={mean_distance:.4f} rel_speed_mean={mean_speed:.4f} "
-                f"success_total={lifetime_success_total} episode_return_mean={mean_episode_return:.3f} "
-                f"collision_count_active={active_collisions} reward_mean={reward_mean:.3f} stage_mix={stage_summary}",
+                f"step={representative_step} stage_mix={stage_summary}\n"
+                f"  rel_dist_mean={mean_distance:.4f} rel_speed_mean={mean_speed:.4f} reward_mean={reward_mean:.3f}\n"
+                f"  success_total={lifetime_success_total} episode_return_mean={mean_episode_return:.3f} "
+                f"collision_count_active={active_collisions}",
                 flush=True,
             )
 
@@ -320,14 +321,16 @@ class DetailedTrainLogCallback(BaseCallback):
             print(
                 f"[episode_end] order={self._episode_log_order} env={idx} "
                 f"episode={_safe_int(summary.get('episode_index')) or 0} "
-                f"done_reason={summary.get('done_reason', 'unknown')} total_reward={_safe_float(summary.get('episode_return')) or 0.0:.3f} "
-                f"steps={_safe_int(summary.get('episode_steps')) or 0} final_distance={_safe_float(summary.get('final_distance')) or 0.0:.4f} "
+                f"done_reason={summary.get('done_reason', 'unknown')} "
+                f"stage={summary.get('curriculum_stage', 'unknown')}\n"
+                f"  total_reward={_safe_float(summary.get('episode_return')) or 0.0:.3f} "
+                f"steps={_safe_int(summary.get('episode_steps')) or 0} "
+                f"final_distance={_safe_float(summary.get('final_distance')) or 0.0:.4f} "
                 f"min_distance={_safe_float(summary.get('min_distance')) or 0.0:.4f} "
-                f"final_speed={_safe_float(summary.get('final_speed')) or 0.0:.4f} "
-                f"collisions={_safe_int(summary.get('episode_collision_count')) or 0} "
+                f"final_speed={_safe_float(summary.get('final_speed')) or 0.0:.4f}\n"
+                f"  collisions={_safe_int(summary.get('episode_collision_count')) or 0} "
                 f"episode_successes={_safe_int(summary.get('episode_success_count')) or 0} "
-                f"lifetime_successes={_safe_int(summary.get('lifetime_success_count')) or 0} "
-                f"stage={summary.get('curriculum_stage', 'unknown')}",
+                f"lifetime_successes={_safe_int(summary.get('lifetime_success_count')) or 0}",
                 flush=True,
             )
         return True
@@ -696,16 +699,24 @@ def train(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> None:
             )
         )
 
-    print("开始训练 UR5 reach 任务")
-    print(f"algo={train_config.algo} run_dir={paths.run_dir}")
     print(
-        f"config: total_timesteps={train_config.total_timesteps}, n_envs={train_config.n_envs}, "
-        f"control_mode={env_config.control_mode}, episode_length={env_config.episode_length}"
+        "[train_start]\n"
+        f"  algo={train_config.algo}\n"
+        f"  run_dir={paths.run_dir}\n"
+        f"  total_timesteps={train_config.total_timesteps}\n"
+        f"  n_envs={train_config.n_envs}\n"
+        f"  device={train_config.device}\n"
+        f"  control_mode={env_config.control_mode}\n"
+        f"  episode_length={env_config.episode_length}",
+        flush=True,
     )
     if train_config.spectator_render and not train_config.render_training:
         print(
-            f"spectator: enabled every={train_config.spectator_render_every} "
-            f"deterministic={train_config.spectator_deterministic}"
+            "[spectator]\n"
+            f"  enabled=True\n"
+            f"  every={train_config.spectator_render_every}\n"
+            f"  deterministic={train_config.spectator_deterministic}",
+            flush=True,
         )
     start_time = time.time()
     # 真正开始训练。`learn(...)` 内部会循环调用环境、采样数据并更新模型。
@@ -725,19 +736,25 @@ def train(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> None:
     final_eval_path = paths.run_dir / "final_eval.json"
     final_eval_path.write_text(json.dumps(final_eval, indent=2, ensure_ascii=False), encoding="utf-8")
     elapsed = time.time() - start_time
-    print(f"训练完成，耗时 {elapsed:.2f} 秒")
-    print(f"最终模型: {paths.final_model_path}")
-    print(f"归一化参数: {paths.final_normalize_path}")
     print(
-        "[final_eval] "
-        f"algo={train_config.algo} success_rate={final_eval['success_rate']:.2%} "
-        f"successes={final_eval['successes']}/{final_eval['episodes']} "
-        f"min_distance={final_eval['min_distance'] if final_eval['min_distance'] is not None else float('nan'):.4f} "
-        f"max_return={final_eval['max_return']:.3f} "
-        f"avg_return={final_eval['average_return']:.3f} "
-        f"avg_steps={final_eval['average_steps']:.1f}"
+        "[train_complete]\n"
+        f"  elapsed_seconds={elapsed:.2f}\n"
+        f"  final_model={paths.final_model_path}\n"
+        f"  vec_normalize={paths.final_normalize_path}",
+        flush=True,
     )
-    print(f"[final_eval] saved_to={final_eval_path}")
+    print(
+        "[final_eval]\n"
+        f"  algo={train_config.algo}\n"
+        f"  success_rate={final_eval['success_rate']:.2%}\n"
+        f"  successes={final_eval['successes']}/{final_eval['episodes']}\n"
+        f"  min_distance={final_eval['min_distance'] if final_eval['min_distance'] is not None else float('nan'):.4f}\n"
+        f"  max_return={final_eval['max_return']:.3f}\n"
+        f"  avg_return={final_eval['average_return']:.3f}\n"
+        f"  avg_steps={final_eval['average_steps']:.1f}\n"
+        f"  saved_to={final_eval_path}",
+        flush=True,
+    )
     env.close()
     eval_env.close()
 
@@ -906,11 +923,11 @@ def test(
         env = VecNormalize.load(str(resolved_norm), env)
         env.training = False
         env.norm_reward = False
-        print(f"已加载 VecNormalize: {resolved_norm}")
+        print(f"[test_load]\n  vec_normalize={resolved_norm}", flush=True)
 
     # 第三步：按算法类型加载模型对象。
     model = _model_class(algo).load(str(resolved_model), env=env)
-    print(f"已加载模型: {resolved_model}")
+    print(f"[test_load]\n  model={resolved_model}", flush=True)
 
     # 第四步：循环执行若干测试回合，并按需打印 reward 分解。
     for episode_index in range(max(int(episodes), 1)):
@@ -931,15 +948,22 @@ def test(
             if print_reward_terms:
                 # `reward_terms` 来自环境 `info`，可以直接帮助分析策略当前主要吃的是哪一项奖励。
                 print(
-                    f"[episode {episode_index + 1} step {step}] reward={reward_value:.4f} "
-                    f"distance={float(info0.get('distance', 0.0)):.4f} done_reason={info0.get('done_reason', 'running')}"
+                    f"[test_step] episode={episode_index + 1} step={step}\n"
+                    f"  reward={reward_value:.4f} "
+                    f"distance={float(info0.get('distance', 0.0)):.4f} "
+                    f"done_reason={info0.get('done_reason', 'running')}",
+                    flush=True,
                 )
                 if isinstance(info0.get("reward_terms"), dict):
-                    print(f"  reward_terms={info0['reward_terms']}")
+                    print(f"  reward_terms={info0['reward_terms']}", flush=True)
         info0 = info[0] if isinstance(info, (list, tuple)) and info else {}
         print(
-            f"Episode {episode_index + 1}: steps={step}, total_reward={total_reward:.3f}, "
-            f"distance={float(info0.get('distance', 0.0)):.4f}, done_reason={info0.get('done_reason', 'unknown')}"
+            f"[test_episode_end] episode={episode_index + 1}\n"
+            f"  steps={step}\n"
+            f"  total_reward={total_reward:.3f}\n"
+            f"  distance={float(info0.get('distance', 0.0)):.4f}\n"
+            f"  done_reason={info0.get('done_reason', 'unknown')}",
+            flush=True,
         )
     env.close()
     if render_mode == "human":
