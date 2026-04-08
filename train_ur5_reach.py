@@ -235,12 +235,17 @@ def _safe_int(value) -> int | None:
 class DetailedTrainLogCallback(BaseCallback):
     # 训练过程诊断日志：
     # 1. 开始训练时打印观测向量每一段的真实含义。
-    # 2. 每个向量化 step 输出一行聚合诊断。
+    # 2. 每隔固定数量的向量化 step 输出一行聚合诊断。
     # 3. 每个回合结束时输出完整摘要。
 
-    def __init__(self, verbose: int = 0) -> None:
+    def __init__(self, verbose: int = 0, train_step_log_every: int = 100) -> None:
         super().__init__(verbose=verbose)
         self._episode_log_order = 0
+        # SB3 的 progress bar 本身会持续刷新单行状态。
+        # 如果我们每个向量化 step 都 `print(...)`，终端会被训练日志刷满，
+        # 进度条看起来就像“消失了”。因此这里把聚合训练日志做节流，
+        # 只保留固定间隔输出；而回合结束摘要仍然实时打印。
+        self._train_step_log_every = max(int(train_step_log_every), 1)
 
     def _on_training_start(self) -> None:
         print("observation_schema:")
@@ -294,12 +299,14 @@ class DetailedTrainLogCallback(BaseCallback):
         representative_step = _safe_int((representative_info or {}).get("step_in_episode")) or 0
         representative_episode = _safe_int((representative_info or {}).get("episode_index")) or 0
         stage_summary = ",".join(f"{name}:{count}" for name, count in sorted(stage_counts.items())) if stage_counts else "unknown"
-        print(
-            f"[train_step] env_steps={self.num_timesteps} episode={representative_episode} "
-            f"step={representative_step} rel_dist_mean={mean_distance:.4f} rel_speed_mean={mean_speed:.4f} "
-            f"success_total={lifetime_success_total} episode_return_mean={mean_episode_return:.3f} "
-            f"collision_count_active={active_collisions} reward_mean={reward_mean:.3f} stage_mix={stage_summary}"
-        )
+        if self.n_calls % self._train_step_log_every == 0:
+            print(
+                f"[train_step] env_steps={self.num_timesteps} episode={representative_episode} "
+                f"step={representative_step} rel_dist_mean={mean_distance:.4f} rel_speed_mean={mean_speed:.4f} "
+                f"success_total={lifetime_success_total} episode_return_mean={mean_episode_return:.3f} "
+                f"collision_count_active={active_collisions} reward_mean={reward_mean:.3f} stage_mix={stage_summary}",
+                flush=True,
+            )
 
         finished_episodes: list[tuple[int, dict]] = []
         for idx, done in enumerate(dones):
@@ -320,7 +327,8 @@ class DetailedTrainLogCallback(BaseCallback):
                 f"collisions={_safe_int(summary.get('episode_collision_count')) or 0} "
                 f"episode_successes={_safe_int(summary.get('episode_success_count')) or 0} "
                 f"lifetime_successes={_safe_int(summary.get('lifetime_success_count')) or 0} "
-                f"stage={summary.get('curriculum_stage', 'unknown')}"
+                f"stage={summary.get('curriculum_stage', 'unknown')}",
+                flush=True,
             )
         return True
 
