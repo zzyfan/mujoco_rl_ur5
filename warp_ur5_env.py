@@ -613,7 +613,8 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         reward += jp.sum(new_phase_hits.astype(jp.float32) * self._phase_rewards)
         phase_hits = jp.logical_or(phase_hits, new_phase_hits)
 
-        # 第四组是运动质量项：速度过快惩罚、朝向目标运动奖励、关节速度变化惩罚。
+        # 第四组是运动质量项：速度过快惩罚、朝向目标运动奖励、关节速度变化惩罚，
+        # 再加上与主线一致的 wrist 微调奖励和异常旋转惩罚。
         reward -= jp.where(ee_speed > self._config.speed_penalty_threshold, self._config.speed_penalty_value, 0.0)
         to_target = relative_pos / jp.maximum(distance, 1e-6)
         move_dir = ee_vel / jp.maximum(ee_speed, 1e-6)
@@ -623,12 +624,54 @@ class UR5WarpReachEnv(mjx_env.MjxEnv):
         joint_vel_change = jp.abs(joint_vel - state.info["prev_joint_vel"])
         reward -= self._config.joint_vel_change_penalty_gain * jp.sum(joint_vel_change)
         reward -= self._config.action_magnitude_penalty_gain * jp.mean(jp.abs(torque_cmd))
-        reward -= self._config.action_change_penalty_gain * jp.mean(jp.abs(torque_cmd - state.info["prev_torque"]))
+        reward -= self._config.action_change_penalty_gain * jp.mean(jp.square(torque_cmd - state.info["prev_torque"]))
         reward -= jp.where(
             jp.logical_and(distance > self._config.idle_distance_threshold, ee_speed < self._config.idle_speed_threshold),
             self._config.idle_penalty_value,
             0.0,
         )
+
+        current_wrist_velocities = joint_vel[3:6]
+        wrist_joint_velocities = jp.abs(current_wrist_velocities)
+        previous_wrist_velocities = state.info["prev_joint_vel"][3:6]
+        micro_adjustment_speed_threshold = jp.asarray(self._config.wrist_micro_adjustment_speed_threshold, dtype=jp.float32)
+        wrist_speed_excess = jp.maximum(wrist_joint_velocities - micro_adjustment_speed_threshold, 0.0)
+        reward -= self._config.wrist_rotation_penalty * jp.sum(wrist_speed_excess)
+
+        wrist_action_delta = jp.abs(torque_cmd[3:6] - state.info["prev_torque"][3:6])
+        reward -= self._config.wrist_action_smoothness_penalty * jp.mean(jp.square(wrist_action_delta))
+
+        reward -= jp.where(
+            jp.max(wrist_joint_velocities) > self._config.wrist_speed_penalty_threshold,
+            self._config.wrist_speed_penalty_value,
+            0.0,
+        )
+
+        significant_rotation = jp.logical_or(
+            jp.abs(current_wrist_velocities) > self._config.wrist_speed_penalty_threshold * 0.25,
+            jp.abs(previous_wrist_velocities) > self._config.wrist_speed_penalty_threshold * 0.25,
+        )
+        direction_flips = jp.logical_and(current_wrist_velocities * previous_wrist_velocities < 0.0, significant_rotation)
+        reward -= self._config.wrist_direction_flip_penalty * jp.sum(direction_flips.astype(jp.float32))
+
+        wrist_alignment_reward = jp.where(
+            jp.logical_and(
+                distance <= self._config.wrist_alignment_distance_threshold,
+                jp.logical_and(
+                    distance < state.info["prev_distance"],
+                    jp.logical_and(
+                        ee_speed <= self._config.wrist_alignment_ee_speed_threshold,
+                        jp.logical_and(
+                            jp.max(wrist_joint_velocities) <= micro_adjustment_speed_threshold,
+                            jp.logical_not(jp.any(direction_flips)),
+                        ),
+                    ),
+                ),
+            ),
+            self._config.wrist_alignment_reward_gain * (state.info["prev_distance"] - distance),
+            0.0,
+        )
+        reward += wrist_alignment_reward
 
         # 第五组是诊断项：如果距离、末端速度或关节速度明显失控，就标记为 runaway。
         # 这里默认不让 runaway 直接结束回合，只把它保存在 metrics 里做观察。

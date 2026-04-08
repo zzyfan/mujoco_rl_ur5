@@ -3,7 +3,7 @@
 #
 # 这版文件以最近一版结构完整的实现为基线，
 # 再补上后续约定的语义：
-# - 成功判定以两指尖中点为参考点
+# - 成功判定按末端模型自动切换参考点：有夹爪时用两指中点，无夹爪时用 ee_link 原点
 # - 目标球碰撞也计入碰撞惩罚
 # - reset/step 都输出训练脚本期望的详细 info 字段
 # - 课程学习按回合阶段切换 fixed -> local_random -> full_random
@@ -26,11 +26,11 @@ except Exception:
 from ur5_reach_config import UR5ReachEnvConfig, project_root
 
 OBSERVATION_SCHEMA = (
-    ("obs[00:03]", "relative_position_xyz", "目标位置减指尖中点位置，单位米；依次对应 x/y/z 三个方向。"),
+    ("obs[00:03]", "relative_position_xyz", "目标位置减当前末端参考点位置，单位米；依次对应 x/y/z 三个方向。"),
     ("obs[03:09]", "joint_positions", "UR5 六个关节当前角度，单位弧度；顺序是 joint1 到 joint6。"),
     ("obs[09:15]", "joint_velocities", "UR5 六个关节当前角速度，单位弧度每秒；顺序是 joint1 到 joint6。"),
     ("obs[15:21]", "previous_torque", "上一决策步实际施加到六个关节的力矩，单位牛米；顺序是 joint1 到 joint6。"),
-    ("obs[21:24]", "ee_velocity_xyz", "指尖中点当前线速度，单位米每秒；依次对应 x/y/z 三个方向。"),
+    ("obs[21:24]", "ee_velocity_xyz", "当前末端参考点线速度，单位米每秒；依次对应 x/y/z 三个方向。"),
 )
 
 
@@ -48,7 +48,7 @@ class UR5ReachEnv(gym.Env):
         if self.render_mode not in (None, "human"):
             raise ValueError(f"Unsupported render_mode: {self.render_mode}")
 
-        xml_path = project_root() / self.config.model_xml
+        xml_path = self._resolve_model_xml()
         if not xml_path.exists():
             raise FileNotFoundError(f"MuJoCo XML not found: {xml_path}")
 
@@ -75,12 +75,22 @@ class UR5ReachEnv(gym.Env):
             [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name) for name in self.arm_actuator_names],
             dtype=np.int32,
         )
+        # 夹爪执行器现在允许在 XML 里直接注释掉。
+        # 如果对应 actuator 不存在，就返回空数组，环境后面也不会再向这些 ctrl 槽写值。
         self.gripper_actuator_ids = np.array(
-            [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name) for name in self.gripper_actuator_names],
+            [
+                actuator_id
+                for name in self.gripper_actuator_names
+                if (actuator_id := mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)) != -1
+            ],
             dtype=np.int32,
         )
         self.gravity_actuator_ids = np.array(
-            [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name) for name in self.gravity_actuator_names],
+            [
+                actuator_id
+                for name in self.gravity_actuator_names
+                if (actuator_id := mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)) != -1
+            ],
             dtype=np.int32,
         )
 
@@ -92,7 +102,7 @@ class UR5ReachEnv(gym.Env):
         self.ee_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "ee_link")
         self.left_finger_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "left_follower_link")
         self.right_finger_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "right_follower_link")
-
+        self.target_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "target_1")
         self.target_x_qpos_adr = self.model.jnt_qposadr[
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "free_x_1")
         ]
@@ -137,6 +147,8 @@ class UR5ReachEnv(gym.Env):
         self.lifetime_success_count = 0
         self.episode_collision_count = 0
         self.episode_success_count = 0
+        self.target_contact_steps = 0
+        self.target_contact_achieved = False
         self.episode_return = 0.0
 
         self.target_position = np.zeros(3, dtype=np.float32)
@@ -162,6 +174,14 @@ class UR5ReachEnv(gym.Env):
     @classmethod
     def observation_schema(cls) -> tuple[tuple[str, str, str], ...]:
         return OBSERVATION_SCHEMA
+
+    def _resolve_model_xml(self) -> Path:
+        # 末端夹爪作为一个可选开关处理：
+        # - 默认使用原始带夹爪的 XML
+        # - 打开开关后切到简化末端版本
+        if bool(self.config.disable_gripper_end_effector):
+            return project_root() / "assets/robotiq_cxy/lab_env_no_gripper.xml"
+        return project_root() / self.config.model_xml
 
     def _collect_descendant_body_ids(self, root_body_id: int) -> set[int]:
         result: set[int] = set()
@@ -191,10 +211,19 @@ class UR5ReachEnv(gym.Env):
             dtype=np.float32,
         )
 
-    def _finger_center(self) -> np.ndarray:
-        left = self.data.xpos[self.left_finger_body_id].copy()
-        right = self.data.xpos[self.right_finger_body_id].copy()
-        return ((left + right) * 0.5).astype(np.float32)
+    def _ee_reference_point(self) -> np.ndarray:
+        # 参考点跟末端模型开关联动：
+        # - 带夹爪模型：使用两指中点，贴近抓取中心语义
+        # - 简化末端模型：直接使用 ee_link 原点
+        if (
+            not bool(self.config.disable_gripper_end_effector)
+            and int(self.left_finger_body_id) != -1
+            and int(self.right_finger_body_id) != -1
+        ):
+            left = self.data.xpos[self.left_finger_body_id].copy()
+            right = self.data.xpos[self.right_finger_body_id].copy()
+            return ((left + right) * 0.5).astype(np.float32)
+        return self.data.xpos[self.ee_body_id].copy().astype(np.float32)
 
     def _stage_name(self, episode_index: int) -> str:
         fixed = max(int(self.config.curriculum_fixed_episodes), 0)
@@ -254,7 +283,7 @@ class UR5ReachEnv(gym.Env):
         )
 
     def _compose_observation(self) -> np.ndarray:
-        ee_position = self._finger_center()
+        ee_position = self._ee_reference_point()
         relative_position = self.target_position - ee_position
         joint_positions = self.data.qpos[self.arm_qpos_adr].copy()
         joint_velocities = self.data.qvel[self.arm_qvel_adr].copy()
@@ -299,13 +328,24 @@ class UR5ReachEnv(gym.Env):
         self.previous_control = smoothed.copy()
         return smoothed
 
-    def _has_external_collision(self) -> bool:
+    def _contact_state(self) -> tuple[bool, bool]:
+        # 把“碰到目标球”和“其他外部碰撞”分开：
+        # - 目标球接触：用于接触奖励与保持成功逻辑
+        # - 其他碰撞：继续按原来的碰撞惩罚处理
+        target_contact = False
+        external_collision = False
         geom_body_ids = self.model.geom_bodyid
         for contact_index in range(self.data.ncon):
             contact = self.data.contact[contact_index]
             geom1 = int(contact.geom1)
             geom2 = int(contact.geom2)
             if geom1 in self.ignored_contact_geom_ids or geom2 in self.ignored_contact_geom_ids:
+                continue
+            if geom1 == int(self.target_geom_id) or geom2 == int(self.target_geom_id):
+                other_geom = geom2 if geom1 == int(self.target_geom_id) else geom1
+                other_body = int(geom_body_ids[other_geom])
+                if other_body in self.robot_body_ids:
+                    target_contact = True
                 continue
             body1 = int(geom_body_ids[geom1])
             body2 = int(geom_body_ids[geom2])
@@ -314,8 +354,8 @@ class UR5ReachEnv(gym.Env):
             if body1_is_robot and body2_is_robot:
                 continue
             if body1_is_robot or body2_is_robot:
-                return True
-        return False
+                external_collision = True
+        return target_contact, external_collision
 
     def _update_ee_velocity(self, ee_position: np.ndarray) -> None:
         dt = max(float(self.model.opt.timestep) * int(self.config.frame_skip), 1e-6)
@@ -327,6 +367,9 @@ class UR5ReachEnv(gym.Env):
         action: np.ndarray,
         previous_action: np.ndarray,
         distance: float,
+        target_contact: bool,
+        target_contact_started: bool,
+        target_hold_steps: int,
         collision: bool,
         ee_speed: float,
         remaining_steps: int,
@@ -356,11 +399,8 @@ class UR5ReachEnv(gym.Env):
             "smoothness_penalty": -float(self.config.action_smoothness_penalty)
             * float(np.mean(np.square(action - previous_action))),
             "joint_velocity_penalty": 0.0,
-            "wrist_alignment_reward": 0.0,
-            "wrist_rotation_penalty": 0.0,
-            "wrist_action_smoothness_penalty": 0.0,
-            "wrist_speed_penalty": 0.0,
-            "wrist_direction_flip_penalty": 0.0,
+            "target_contact_reward": 0.0,
+            "target_hold_success_bonus": 0.0,
             "collision_penalty": 0.0,
             "success_bonus": 0.0,
             "runaway_penalty": 0.0,
@@ -380,7 +420,7 @@ class UR5ReachEnv(gym.Env):
         if ee_speed > float(self.config.speed_penalty_threshold):
             reward_terms["speed_penalty"] = -float(self.config.speed_penalty_value)
 
-        to_target = self.target_position - self._finger_center()
+        to_target = self.target_position - self._ee_reference_point()
         to_target_norm = float(np.linalg.norm(to_target))
         if ee_speed > 1e-6 and to_target_norm > 1e-6:
             movement_direction = self.current_ee_velocity / (ee_speed + 1e-6)
@@ -390,54 +430,15 @@ class UR5ReachEnv(gym.Env):
 
         joint_velocity_change = np.abs(self.data.qvel[self.arm_qvel_adr] - self.previous_joint_velocities)
         reward_terms["joint_velocity_penalty"] = -float(self.config.joint_velocity_penalty) * float(np.sum(joint_velocity_change))
-        # 单独约束 wrist 三轴，并区分“正常微调”和“异常乱转”。
-        #
-        # 这里的判断分三层：
-        # 1. 正常微调：接近目标时，允许低速稳定的 wrist 调整，不直接惩罚。
-        # 2. 异常持续旋转：如果 wrist 角速度长期偏大，就线性扣分。
-        # 3. 异常抖动翻转：如果 wrist 方向来回反转，或者指令跳变很大，再额外扣分。
-        #
-        # 设计上刻意没有把“所有 wrist 旋转”都视为坏事，因为末端接近目标时，
-        # 适量姿态修正本来就是任务的一部分。
-        current_wrist_velocities = self.data.qvel[self.arm_qvel_adr][self.wrist_joint_indices]
-        wrist_joint_velocities = np.abs(current_wrist_velocities)
-        previous_wrist_velocities = self.previous_joint_velocities[self.wrist_joint_indices]
-        micro_adjustment_speed_threshold = float(self.config.wrist_micro_adjustment_speed_threshold)
-        # 低于微调阈值的 wrist 动作视为正常姿态调整，不直接惩罚；
-        # 超出的那部分才进入线性旋转惩罚。
-        wrist_speed_excess = np.maximum(wrist_joint_velocities - micro_adjustment_speed_threshold, 0.0)
-        reward_terms["wrist_rotation_penalty"] = -float(self.config.wrist_rotation_penalty) * float(np.sum(wrist_speed_excess))
-        wrist_action_delta = np.abs(action[self.wrist_joint_indices] - previous_action[self.wrist_joint_indices])
-        reward_terms["wrist_action_smoothness_penalty"] = -float(self.config.wrist_action_smoothness_penalty) * float(
-            np.mean(np.square(wrist_action_delta))
-        )
-        # 单方向持续高速旋转也不允许。这里参考末端速度惩罚，给 wrist 三轴单独加阈值型惩罚。
-        # 这一步负责抓住“虽然没有来回甩，但一直高速朝同一个方向拧”的行为。
-        if float(np.max(wrist_joint_velocities)) > float(self.config.wrist_speed_penalty_threshold):
-            reward_terms["wrist_speed_penalty"] = -float(self.config.wrist_speed_penalty_value)
-        # 仅惩罚“有幅度的方向翻转”，避免接近 0 的数值噪声被误判成来回旋转。
-        significant_rotation = np.logical_or(
-            np.abs(current_wrist_velocities) > float(self.config.wrist_speed_penalty_threshold) * 0.25,
-            np.abs(previous_wrist_velocities) > float(self.config.wrist_speed_penalty_threshold) * 0.25,
-        )
-        direction_flips = np.logical_and(current_wrist_velocities * previous_wrist_velocities < 0.0, significant_rotation)
-        reward_terms["wrist_direction_flip_penalty"] = -float(self.config.wrist_direction_flip_penalty) * float(
-            np.sum(direction_flips.astype(np.float32))
-        )
-        # 只有当末端已经接近目标、运动速度也不大，而且 wrist 没有乱翻转时，
-        # 才把小幅稳定的 wrist 调整视为“正常姿态微调”并给一个小奖励。
-        # 这条奖励的作用不是鼓励 wrist 主导运动，而是告诉策略：
-        # “当你已经快到目标了，可以靠小而稳的姿态修正把最后一点对准做好。”
-        if (
-            distance <= float(self.config.wrist_alignment_distance_threshold)
-            and distance < previous_distance
-            and ee_speed <= float(self.config.wrist_alignment_ee_speed_threshold)
-            and float(np.max(wrist_joint_velocities)) <= micro_adjustment_speed_threshold
-            and not bool(np.any(direction_flips))
-        ):
-            reward_terms["wrist_alignment_reward"] = float(self.config.wrist_alignment_reward_gain) * (
-                previous_distance - float(distance)
-            )
+        # 末端执行器 / wrist 专项奖励与惩罚先整体关闭。
+        # 当前先只保留通用的距离、进展、速度、碰撞和成功奖励，
+        # 避免 wrist 特定 shaping 继续主导策略学习。
+        if target_contact:
+            # 接触到目标并保持接触时，每步给一个略高于时间惩罚的小正奖励，
+            # 让策略学到“贴住目标并稳住”比马上弹开更划算。
+            reward_terms["target_contact_reward"] = float(self.config.target_contact_reward)
+            if target_contact_started:
+                done_reason = "contact_success"
 
         if collision:
             reward_terms["collision_penalty"] = -float(self.config.collision_penalty)
@@ -445,8 +446,13 @@ class UR5ReachEnv(gym.Env):
             terminated = True
             done_reason = "collision"
 
-        success = distance <= self._success_threshold()
-        if success:
+        required_hold_steps = max(
+            int(round(float(self.config.target_hold_duration_seconds) / max(float(self.model.opt.timestep) * int(self.config.frame_skip), 1e-6))),
+            1,
+        )
+        hold_success = bool(target_contact) and int(target_hold_steps) >= required_hold_steps
+        if hold_success:
+            reward_terms["target_hold_success_bonus"] = float(self.config.target_hold_success_bonus)
             reward_terms["success_bonus"] = float(self.config.success_bonus)
             reward_terms["success_bonus"] += float(self.config.success_remaining_step_gain) * float(max(remaining_steps, 0))
             if ee_speed < 0.01:
@@ -456,7 +462,7 @@ class UR5ReachEnv(gym.Env):
             elif ee_speed < 0.10:
                 reward_terms["success_bonus"] += float(self.config.success_speed_bonus_medium)
             terminated = True
-            done_reason = "success"
+            done_reason = "hold_success"
 
         if distance > float(self.config.runaway_distance_threshold):
             reward_terms["runaway_penalty"] = -float(self.config.runaway_penalty)
@@ -488,11 +494,13 @@ class UR5ReachEnv(gym.Env):
         self._set_target_position(self.target_position)
 
         self.data.ctrl[:] = 0.0
-        self.data.ctrl[self.gripper_actuator_ids] = float(self.config.fixed_gripper_ctrl)
-        self.data.ctrl[self.gravity_actuator_ids] = float(self.config.gravity_compensation)
+        if self.gripper_actuator_ids.size > 0:
+            self.data.ctrl[self.gripper_actuator_ids] = float(self.config.fixed_gripper_ctrl)
+        if self.gravity_actuator_ids.size > 0:
+            self.data.ctrl[self.gravity_actuator_ids] = float(self.config.gravity_compensation)
 
         mujoco.mj_forward(self.model, self.data)
-        ee_position = self._finger_center()
+        ee_position = self._ee_reference_point()
 
         self.step_count = 0
         self.previous_action[:] = 0.0
@@ -509,6 +517,8 @@ class UR5ReachEnv(gym.Env):
         self.episode_return = 0.0
         self.episode_collision_count = 0
         self.episode_success_count = 0
+        self.target_contact_steps = 0
+        self.target_contact_achieved = False
 
         observation = self._compose_observation()
         info = {
@@ -522,6 +532,10 @@ class UR5ReachEnv(gym.Env):
             "ee_speed": 0.0,
             "relative_speed": 0.0,
             "success": False,
+            "target_contact": False,
+            "contact_success": False,
+            "hold_success": False,
+            "target_contact_steps": 0,
             "collision": False,
             "runaway": False,
             "done_reason": "reset",
@@ -541,8 +555,10 @@ class UR5ReachEnv(gym.Env):
         control = self._action_to_control(normalized_action)
 
         self.data.ctrl[self.arm_actuator_ids] = control
-        self.data.ctrl[self.gripper_actuator_ids] = float(self.config.fixed_gripper_ctrl)
-        self.data.ctrl[self.gravity_actuator_ids] = float(self.config.gravity_compensation)
+        if self.gripper_actuator_ids.size > 0:
+            self.data.ctrl[self.gripper_actuator_ids] = float(self.config.fixed_gripper_ctrl)
+        if self.gravity_actuator_ids.size > 0:
+            self.data.ctrl[self.gravity_actuator_ids] = float(self.config.gravity_compensation)
 
         self.previous_torque = control.copy()
         self.previous_joint_velocities = self.data.qvel[self.arm_qvel_adr].copy()
@@ -551,16 +567,25 @@ class UR5ReachEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)
 
         self.step_count += 1
-        ee_position = self._finger_center()
+        ee_position = self._ee_reference_point()
         self._update_ee_velocity(ee_position)
         distance = float(np.linalg.norm(self.target_position - ee_position))
         ee_speed = float(np.linalg.norm(self.current_ee_velocity))
-        collision = self._has_external_collision()
+        target_contact, collision = self._contact_state()
+        target_contact_started = bool(target_contact) and self.target_contact_steps == 0
+        if target_contact:
+            self.target_contact_steps += 1
+            self.target_contact_achieved = True
+        else:
+            self.target_contact_steps = 0
         remaining_steps = int(self.config.episode_length) - self.step_count
         reward, terminated, truncated, reward_terms, done_reason = self._compute_reward(
             normalized_action,
             previous_action,
             distance,
+            target_contact,
+            target_contact_started,
+            int(self.target_contact_steps),
             collision,
             ee_speed,
             remaining_steps,
@@ -591,6 +616,9 @@ class UR5ReachEnv(gym.Env):
                 "final_speed": float(ee_speed),
                 "curriculum_stage": self.current_stage,
                 "done_reason": done_reason,
+                "target_contact_achieved": bool(self.target_contact_achieved),
+                "hold_success": done_reason == "hold_success",
+                "target_contact_steps": int(self.target_contact_steps),
                 "reward_terms": dict(reward_terms),
             }
 
@@ -602,7 +630,11 @@ class UR5ReachEnv(gym.Env):
             "relative_distance": distance,
             "ee_speed": ee_speed,
             "relative_speed": ee_speed,
-            "success": done_reason == "success",
+            "success": done_reason == "hold_success",
+            "target_contact": bool(target_contact),
+            "contact_success": bool(target_contact_started),
+            "hold_success": done_reason == "hold_success",
+            "target_contact_steps": int(self.target_contact_steps),
             "collision": collision,
             "runaway": done_reason == "runaway",
             "done_reason": done_reason,

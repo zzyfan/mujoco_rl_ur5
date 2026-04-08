@@ -25,7 +25,8 @@ from typing import Any
 ENV_PARAMETER_DOCS: dict[str, str] = {
     # 这张表供 README、参数文档和 notebook 直接复用。
     # 好处是参数解释只有一份来源，后续修改不会出现文档和代码不同步。
-    "model_xml": "MuJoCo XML 模型路径。保持仓库内相对路径，迁移到别的机器也能直接运行。",
+    "model_xml": "默认 MuJoCo XML 模型路径。保持仓库内相对路径，迁移到别的机器也能直接运行。",
+    "disable_gripper_end_effector": "是否切换到不带夹爪的简化末端模型。打开后会自动使用简化 XML。",
     "frame_skip": "每个 RL step 对应多少个物理步。值越大训练更快，但动作更粗。",
     "episode_length": "单回合最多决策多少次。",
     "render_camera_name": "默认渲染相机名。",
@@ -56,6 +57,9 @@ ENV_PARAMETER_DOCS: dict[str, str] = {
     "success_threshold_stage1": "第 1 阶段成功阈值。",
     "success_threshold_stage2": "第 2 阶段成功阈值。",
     "success_threshold_stage3": "第 3 阶段成功阈值。",
+    "target_contact_reward": "机器人与目标球保持接触时，每步给的小额正奖励；设计成略大于每步时间惩罚。",
+    "target_hold_duration_seconds": "机器人与目标球连续接触多少秒后，判定为保持成功。",
+    "target_hold_success_bonus": "连续接触达到保持时长后发放的一次性大额成功奖励。",
     "step_penalty": "每一步固定时间惩罚。",
     "distance_weight": "基础距离惩罚权重。",
     "progress_reward_gain": "距离变近时的奖励系数。",
@@ -139,6 +143,7 @@ class UR5ReachEnvConfig:
     # 模型与仿真时间步设置。`model_xml` 使用仓库相对路径，保证跨机器迁移时不用改绝对路径。
     # `frame_skip` 决定“一个 RL step 里包含多少个 MuJoCo 物理子步”。
     model_xml: str = "assets/robotiq_cxy/lab_env.xml"
+    disable_gripper_end_effector: bool = False
     frame_skip: int = 1
     episode_length: int = 3000
     render_camera_name: str = "workbench_camera"
@@ -185,6 +190,9 @@ class UR5ReachEnvConfig:
     success_threshold_stage1: float = 0.010
     success_threshold_stage2: float = 0.010
     success_threshold_stage3: float = 0.010
+    target_contact_reward: float = 0.25
+    target_hold_duration_seconds: float = 10.0
+    target_hold_success_bonus: float = 12000.0
 
     # 奖励项参数。环境里的 reward 会逐项读取这些系数并写入 reward_terms。
     # 这些字段最终会进入 `_compute_reward()` 里的各个 reward term。

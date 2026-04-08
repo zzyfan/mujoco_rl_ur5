@@ -8,6 +8,7 @@
 python train_ur5_reach.py --algo sac --run-name ur5_sac_main --total-timesteps 1500000
 python train_ur5_reach.py --algo td3 --run-name ur5_td3_main --total-timesteps 1500000
 python train_ur5_reach.py --algo ppo --run-name ur5_ppo_main --total-timesteps 1500000
+python train_ur5_reach.py --algo td3 --run-name ur5_td3_main --total-timesteps 1500000 --disable-gripper-end-effector
 ```
 
 ### Test
@@ -17,6 +18,7 @@ python train_ur5_reach.py --algo ppo --run-name ur5_ppo_main --total-timesteps 1
 ```bash
 python train_ur5_reach.py --algo sac --run-name ur5_sac_main --test --model best --episodes 1 --render-mode human
 python train_ur5_reach.py --algo sac --run-name ur5_sac_main --test --model final --episodes 1 --render-mode human
+python train_ur5_reach.py --algo sac --run-name ur5_sac_main --test --model best --episodes 1 --render-mode human --disable-gripper-end-effector
 ```
 
 ### Common Flags
@@ -27,6 +29,13 @@ python train_ur5_reach.py --algo sac --run-name ur5_sac_main --test --model fina
 - `--render-mode`：`none` / `human`
 - `--n-envs`：并行环境数
 - `--device`：`auto` / `cpu` / `cuda`
+- `--disable-gripper-end-effector`：切换到不带夹爪的简化末端模型
+
+说明：
+
+- 默认使用带夹爪的原始模型
+- 打开 `--disable-gripper-end-effector` 后，会改用简化末端 XML
+- 两种末端模型的训练产物会自动分开保存，不会覆盖彼此
 
 ## Warp Line
 
@@ -66,6 +75,17 @@ runs/{local|server}/main/{algo}/{run_name}/
   final_eval.json
 ```
 
+若使用 `--disable-gripper-end-effector`，主线产物会自动写到：
+
+```text
+runs/{local|server}/main/{algo}/{run_name}__no_gripper/
+  best_model/
+  final_model/
+  interrupted/
+  tensorboard/
+  final_eval.json
+```
+
 Warp 产物：
 
 ```text
@@ -86,6 +106,12 @@ runs/{local|server}/warp/{algo}/{run_name}/
 - `success_rate`
 
 主线来自显式测试回合，Warp 线来自训练评估流汇总。
+
+补充说明：
+
+- 主线最终评估和测试加载都会根据是否传入 `--disable-gripper-end-effector` 自动选择对应模型目录
+- 带夹爪模型默认使用两指中点作为参考点
+- 不带夹爪模型默认使用 `ee_link` 原点作为参考点
 
 ## Design Notes
 

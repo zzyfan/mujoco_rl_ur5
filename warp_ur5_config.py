@@ -88,9 +88,9 @@ class WarpUR5EnvConfig:
 
     # Warp / MJX 接触和约束缓存。环境并行数量上去以后，这些值会直接影响稳定性。
     # 如果并行规模增大但缓存太小，可能出现接触信息不完整或数值不稳定。
-    naconmax: int = 128
-    naccdmax: int = 128
-    njmax: int = 64
+    naconmax: int = 4096
+    naccdmax: int = 4096
+    njmax: int = 1024
 
     # 目标采样空间。
     target_x_min: float = -0.95
@@ -138,26 +138,35 @@ class WarpUR5EnvConfig:
 
     # dense reward 的组成项和诊断阈值。`step()` 会逐项把这些系数拼进 reward。
     # phase_thresholds / phase_rewards 组合用于“第一次穿过某个距离阈值时发奖励”的机制。
-    step_penalty: float = 0.10
-    base_distance_weight: float = 0.80
-    improvement_gain: float = 1.0
+    step_penalty: float = 0.20
+    base_distance_weight: float = 1.20
+    improvement_gain: float = 1.5
     regress_gain: float = 0.8
-    speed_penalty_threshold: float = 0.5
-    speed_penalty_value: float = 0.2
-    direction_reward_gain: float = 1.0
-    joint_vel_change_penalty_gain: float = 0.03
+    speed_penalty_threshold: float = 0.25
+    speed_penalty_value: float = 2.0
+    direction_reward_gain: float = 1.5
+    joint_vel_change_penalty_gain: float = 0.08
     action_magnitude_penalty_gain: float = 0.0
-    action_change_penalty_gain: float = 0.0
+    action_change_penalty_gain: float = 2.0
     idle_distance_threshold: float = 0.08
     idle_speed_threshold: float = 0.015
     idle_penalty_value: float = 0.0
-    phase_thresholds: tuple[float, ...] = (0.5, 0.3, 0.1, 0.05, 0.01, 0.005, 0.002)
-    phase_rewards: tuple[float, ...] = (100.0, 200.0, 300.0, 500.0, 1000.0, 1500.0, 2000.0)
-    success_bonus: float = 10000.0
-    success_remaining_step_gain: float = 4.0
-    success_speed_bonus_very_slow: float = 2000.0
-    success_speed_bonus_slow: float = 1000.0
-    success_speed_bonus_medium: float = 500.0
+    phase_thresholds: tuple[float, ...] = (0.5, 0.3, 0.1, 0.09, 0.07, 0.05, 0.03, 0.02, 0.01, 0.008, 0.005, 0.003, 0.002)
+    phase_rewards: tuple[float, ...] = (150.0, 300.0, 450.0, 550.0, 700.0, 900.0, 1150.0, 1400.0, 1800.0, 2200.0, 2700.0, 3400.0, 4200.0)
+    wrist_rotation_penalty: float = 0.12
+    wrist_action_smoothness_penalty: float = 1.5
+    wrist_speed_penalty_threshold: float = 0.6
+    wrist_speed_penalty_value: float = 3.0
+    wrist_direction_flip_penalty: float = 2.5
+    wrist_micro_adjustment_speed_threshold: float = 0.20
+    wrist_alignment_distance_threshold: float = 0.03
+    wrist_alignment_ee_speed_threshold: float = 0.10
+    wrist_alignment_reward_gain: float = 1200.0
+    success_bonus: float = 15000.0
+    success_remaining_step_gain: float = 6.0
+    success_speed_bonus_very_slow: float = 3000.0
+    success_speed_bonus_slow: float = 1500.0
+    success_speed_bonus_medium: float = 750.0
     collision_penalty_value: float = 5000.0
     runaway_distance_threshold: float = 10.0
     runaway_ee_speed_threshold: float = 50.0

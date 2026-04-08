@@ -49,6 +49,14 @@ def _model_class(algo: str):
     return mapping[algo]
 
 
+def _artifact_run_name(run_name: str, env_config: UR5ReachEnvConfig) -> str:
+    # 为不同末端模型分开保存产物，避免同名实验互相覆盖。
+    # 规则：
+    # - 带夹爪：沿用原始 run_name
+    # - 不带夹爪：自动追加 `__no_gripper`
+    return f"{run_name}__no_gripper" if bool(env_config.disable_gripper_end_effector) else run_name
+
+
 class SaveVecNormalizeCallback(BaseCallback):
     # 在 best model 更新时同步保存 VecNormalize 参数。
     #
@@ -235,12 +243,13 @@ def _safe_int(value) -> int | None:
 class DetailedTrainLogCallback(BaseCallback):
     # 训练过程诊断日志：
     # 1. 开始训练时打印观测向量每一段的真实含义。
-    # 2. 每隔固定数量的向量化 step 输出一行聚合诊断。
-    # 3. 每个回合结束时输出完整摘要。
+    # 2. 多环境训练时只在回合结束时输出摘要，避免刷掉进度条。
+    # 3. 只有单环境训练时才保留逐步聚合日志。
 
     def __init__(self, verbose: int = 0, train_step_log_every: int = 100) -> None:
         super().__init__(verbose=verbose)
         self._episode_log_order = 0
+        self.max_lifetime_success_total = 0
         # SB3 的 progress bar 本身会持续刷新单行状态。
         # 如果我们每个向量化 step 都 `print(...)`，终端会被训练日志刷满，
         # 进度条看起来就像“消失了”。因此这里把聚合训练日志做节流，
@@ -299,7 +308,9 @@ class DetailedTrainLogCallback(BaseCallback):
         representative_step = _safe_int((representative_info or {}).get("step_in_episode")) or 0
         representative_episode = _safe_int((representative_info or {}).get("episode_index")) or 0
         stage_summary = ",".join(f"{name}:{count}" for name, count in sorted(stage_counts.items())) if stage_counts else "unknown"
-        if self.n_calls % self._train_step_log_every == 0:
+        self.max_lifetime_success_total = max(self.max_lifetime_success_total, int(lifetime_success_total))
+        should_print_step_log = int(getattr(self.training_env, "num_envs", 1)) == 1
+        if should_print_step_log and self.n_calls % self._train_step_log_every == 0:
             print(
                 f"[train_step] env_steps={self.num_timesteps} episode={representative_episode} "
                 f"step={representative_step} stage_mix={stage_summary}\n"
@@ -328,6 +339,9 @@ class DetailedTrainLogCallback(BaseCallback):
                 f"final_distance={_safe_float(summary.get('final_distance')) or 0.0:.4f} "
                 f"min_distance={_safe_float(summary.get('min_distance')) or 0.0:.4f} "
                 f"final_speed={_safe_float(summary.get('final_speed')) or 0.0:.4f}\n"
+                f"  contact_success={int(bool(summary.get('target_contact_achieved')))} "
+                f"hold_success={int(bool(summary.get('hold_success')))} "
+                f"target_contact_steps={_safe_int(summary.get('target_contact_steps')) or 0}\n"
                 f"  collisions={_safe_int(summary.get('episode_collision_count')) or 0} "
                 f"episode_successes={_safe_int(summary.get('episode_success_count')) or 0} "
                 f"lifetime_successes={_safe_int(summary.get('lifetime_success_count')) or 0}",
@@ -355,6 +369,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", type=str, default=train_defaults.run_name, help="实验名字，也是产物目录名字。")
     parser.add_argument("--seed", type=int, default=train_defaults.seed, help="随机种子。")
     parser.add_argument("--episodes", type=int, default=5, help="测试模式运行多少回合。")
+    parser.add_argument(
+        "--success-target",
+        type=int,
+        default=None,
+        help="测试模式下累计成功多少次后提前结束。训练模式下不会使用这个参数。",
+    )
     parser.add_argument("--max-steps", type=int, default=None, help="测试模式覆盖环境回合长度。")
     parser.add_argument(
         "--model",
@@ -403,6 +423,12 @@ def build_parser() -> argparse.ArgumentParser:
     env_group = parser.add_argument_group("Environment")
     env_group.add_argument("--frame-skip", type=int, default=env_defaults.frame_skip, help="每个 RL step 对应多少个物理步。")
     env_group.add_argument("--episode-length", type=int, default=env_defaults.episode_length, help="训练模式的回合长度。")
+    env_group.add_argument(
+        "--disable-gripper-end-effector",
+        action="store_true",
+        default=env_defaults.disable_gripper_end_effector,
+        help="切换到不带夹爪的简化末端模型。",
+    )
     env_group.add_argument("--control-mode", choices=["joint_delta", "torque"], default=env_defaults.control_mode, help="控制模式。")
     env_group.add_argument("--joint-delta-scale", type=float, default=env_defaults.joint_delta_scale, help="关节增量控制时每步最大变化量。")
     env_group.add_argument("--position-kp", type=float, default=env_defaults.position_kp, help="PD 比例增益。")
@@ -432,6 +458,7 @@ def build_env_config(args: argparse.Namespace) -> UR5ReachEnvConfig:
     return UR5ReachEnvConfig(
         frame_skip=args.frame_skip,
         episode_length=args.episode_length,
+        disable_gripper_end_effector=bool(args.disable_gripper_end_effector),
         control_mode=args.control_mode,
         joint_delta_scale=args.joint_delta_scale,
         position_kp=args.position_kp,
@@ -561,13 +588,13 @@ def build_policy_kwargs(train_config: RLTrainConfig) -> dict:
     return {"net_arch": net_arch, "activation_fn": nn.ReLU}
 
 
-def build_model(train_config: RLTrainConfig, env: VecNormalize):
+def build_model(train_config: RLTrainConfig, env: VecNormalize, resolved_run_name: str):
     # 实例化选定算法。
     #
     # 这里把三类算法分开写，是为了让“每个参数最终传给了哪个库函数”一目了然。
     # 先准备网络结构描述和当前实验的输出目录。
     policy_kwargs = build_policy_kwargs(train_config)
-    paths = build_run_paths(train_config.algo, train_config.run_name)
+    paths = build_run_paths(train_config.algo, resolved_run_name)
 
     if train_config.algo == "td3":
         # TD3 需要额外的高斯动作噪声，用于连续控制下的探索。
@@ -652,7 +679,8 @@ def train(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> None:
     # 4. 注册评估、归一化保存、中断保存和渲染回调。
     # 5. 调用 SB3 `learn()` 开始训练。
     # 第一步：构造路径并创建目录。
-    paths = build_run_paths(train_config.algo, train_config.run_name)
+    resolved_run_name = _artifact_run_name(train_config.run_name, env_config)
+    paths = build_run_paths(train_config.algo, resolved_run_name)
     ensure_run_directories(paths)
     # 第二步：先把这次实验的参数落盘，方便中途或事后复现。
     save_run_configuration(paths, env_config, train_config)
@@ -660,7 +688,7 @@ def train(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> None:
     # 第三步：创建训练环境、评估环境和模型。
     env = make_training_env(train_config, env_config)
     eval_env = make_eval_env(train_config, env_config)
-    model = build_model(train_config, env)
+    model = build_model(train_config, env, resolved_run_name)
 
     # 回调列表集中处理“评估、保存、手动中断、渲染”这几类辅助流程。
     callbacks: list[BaseCallback] = []
@@ -685,7 +713,8 @@ def train(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> None:
     callbacks.append(eval_callback)
     callbacks.append(SaveVecNormalizeCallback(eval_callback, paths.best_normalize_path, verbose=1))
     callbacks.append(ManualInterruptCallback(paths.interrupted_model_path, paths.interrupted_normalize_path, verbose=1))
-    callbacks.append(DetailedTrainLogCallback(verbose=1))
+    detailed_log_callback = DetailedTrainLogCallback(verbose=1)
+    callbacks.append(detailed_log_callback)
     # 最后再按模式决定是否追加训练渲染或旁观渲染回调。
     if train_config.render_training:
         callbacks.append(TrainRenderCallback(train_config.render_every, verbose=1))
@@ -703,6 +732,8 @@ def train(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> None:
         "[train_start]\n"
         f"  algo={train_config.algo}\n"
         f"  run_dir={paths.run_dir}\n"
+        f"  artifact_run_name={resolved_run_name}\n"
+        f"  disable_gripper_end_effector={bool(env_config.disable_gripper_end_effector)}\n"
         f"  total_timesteps={train_config.total_timesteps}\n"
         f"  n_envs={train_config.n_envs}\n"
         f"  device={train_config.device}\n"
@@ -729,16 +760,19 @@ def train(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> None:
     # 这里固定测试 `final` 产物，而不是训练中途的最佳模型，回答的是“这次实验最终交付物表现如何”。
     final_eval = evaluate_final_success_rate(
         algo=train_config.algo,
-        run_name=train_config.run_name,
+        run_name=resolved_run_name,
         env_config=env_config,
         episodes=max(int(train_config.eval_episodes), 1),
+        seed=int(train_config.seed),
     )
+    final_eval["training_total_successes"] = int(detailed_log_callback.max_lifetime_success_total)
     final_eval_path = paths.run_dir / "final_eval.json"
     final_eval_path.write_text(json.dumps(final_eval, indent=2, ensure_ascii=False), encoding="utf-8")
     elapsed = time.time() - start_time
     print(
         "[train_complete]\n"
         f"  elapsed_seconds={elapsed:.2f}\n"
+        f"  training_total_successes={int(detailed_log_callback.max_lifetime_success_total)}\n"
         f"  final_model={paths.final_model_path}\n"
         f"  vec_normalize={paths.final_normalize_path}",
         flush=True,
@@ -746,6 +780,7 @@ def train(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> None:
     print(
         "[final_eval]\n"
         f"  algo={train_config.algo}\n"
+        f"  training_total_successes={int(detailed_log_callback.max_lifetime_success_total)}\n"
         f"  success_rate={final_eval['success_rate']:.2%}\n"
         f"  successes={final_eval['successes']}/{final_eval['episodes']}\n"
         f"  min_distance={final_eval['min_distance'] if final_eval['min_distance'] is not None else float('nan'):.4f}\n"
@@ -759,66 +794,63 @@ def train(train_config: RLTrainConfig, env_config: UR5ReachEnvConfig) -> None:
     eval_env.close()
 
 
-def resolve_test_paths(algo: str, run_name: str, model_variant: str) -> tuple[Path, Path]:
+def resolve_test_paths(algo: str, run_name: str, model_variant: str, env_config: UR5ReachEnvConfig | None = None) -> tuple[Path, Path]:
     # 解析测试时要加载的模型路径和归一化路径。
     #
     # 当前测试 CLI 不再要求用户自己写完整路径，而是只传 `best` 或 `final`。
     # 解析顺序：
-    # 1. 新目录结构下的 `best_model/` 或 `final_model/`。
-    # 2. 旧目录结构下兼容的 `best_model/` 或 `final/`。
-    paths = build_run_paths(algo, run_name)
-    scoped_legacy_best_model = paths.run_dir / "best_model" / "best_model.zip"
-    scoped_legacy_best_norm = paths.run_dir / "best_model" / "vec_normalize.pkl"
-    scoped_legacy_final_model = paths.run_dir / "final" / "final_model.zip"
-    scoped_legacy_final_norm = paths.run_dir / "final" / "vec_normalize.pkl"
+    # 1. 先根据末端模型开关，把 run_name 解析成实际保存目录名。
+    # 2. 先查当前作用域，再自动补查 `local` / `server` 两套新目录结构。
+    # 3. 最后回退到旧目录结构兼容路径。
+    resolved_run_name = _artifact_run_name(run_name, env_config or UR5ReachEnvConfig())
+    paths = build_run_paths(algo, resolved_run_name)
+    project_root = paths.project_root
 
-    legacy_run_dir = paths.project_root / "runs" / algo / run_name
+    # 测试时优先查当前分区，但也自动补查 `local` / `server` 两套新目录结构，
+    # 这样把服务器模型拉回本地后，不需要手动设置 `UR5_ARTIFACT_SCOPE` 也能直接测。
+    scoped_run_dirs: list[Path] = []
+    seen_dirs: set[Path] = set()
+    for run_dir in (
+        paths.run_dir,
+        project_root / "runs" / "local" / "main" / algo / resolved_run_name,
+        project_root / "runs" / "server" / "main" / algo / resolved_run_name,
+    ):
+        if run_dir not in seen_dirs:
+            scoped_run_dirs.append(run_dir)
+            seen_dirs.add(run_dir)
+
+    model_candidates: list[Path] = []
+    norm_candidates: list[Path] = []
+    if model_variant == "best":
+        for run_dir in scoped_run_dirs:
+            model_candidates.append(run_dir / "best_model" / "best_model.zip")
+            norm_candidates.append(run_dir / "best_model" / "vec_normalize.pkl")
+    else:
+        for run_dir in scoped_run_dirs:
+            model_candidates.append(run_dir / "final_model" / "final_model.zip")
+            norm_candidates.append(run_dir / "final_model" / "vec_normalize.pkl")
+            model_candidates.append(run_dir / "final" / "final_model.zip")
+            norm_candidates.append(run_dir / "final" / "vec_normalize.pkl")
+
+    legacy_run_dir = project_root / "runs" / algo / resolved_run_name
     legacy_best_model = legacy_run_dir / "best_model" / "best_model.zip"
     legacy_best_norm = legacy_run_dir / "best_model" / "vec_normalize.pkl"
     legacy_final_model = legacy_run_dir / "final" / "final_model.zip"
     legacy_final_norm = legacy_run_dir / "final" / "vec_normalize.pkl"
     legacy_final_model_dir_model = legacy_run_dir / "final_model" / "final_model.zip"
     legacy_final_model_dir_norm = legacy_run_dir / "final_model" / "vec_normalize.pkl"
-
-    root_models_final = paths.project_root / "models" / f"{algo}_ur5_final.zip"
-    root_models_norm = paths.project_root / "models" / "vec_normalize.pkl"
+    root_models_final = project_root / "models" / f"{algo}_ur5_final.zip"
+    root_models_norm = project_root / "models" / "vec_normalize.pkl"
 
     if model_variant == "best":
-        if paths.best_model_path.exists():
-            resolved_model = paths.best_model_path
-        elif scoped_legacy_best_model.exists():
-            resolved_model = scoped_legacy_best_model
-        else:
-            resolved_model = legacy_best_model
-
-        if paths.best_normalize_path.exists():
-            resolved_norm = paths.best_normalize_path
-        elif scoped_legacy_best_norm.exists():
-            resolved_norm = scoped_legacy_best_norm
-        else:
-            resolved_norm = legacy_best_norm
+        model_candidates.append(legacy_best_model)
+        norm_candidates.append(legacy_best_norm)
     else:
-        if paths.final_model_path.exists():
-            resolved_model = paths.final_model_path
-        elif scoped_legacy_final_model.exists():
-            resolved_model = scoped_legacy_final_model
-        elif legacy_final_model_dir_model.exists():
-            resolved_model = legacy_final_model_dir_model
-        elif root_models_final.exists():
-            resolved_model = root_models_final
-        else:
-            resolved_model = legacy_final_model
+        model_candidates.extend((legacy_final_model, legacy_final_model_dir_model, root_models_final))
+        norm_candidates.extend((legacy_final_norm, legacy_final_model_dir_norm, root_models_norm))
 
-        if paths.final_normalize_path.exists():
-            resolved_norm = paths.final_normalize_path
-        elif scoped_legacy_final_norm.exists():
-            resolved_norm = scoped_legacy_final_norm
-        elif legacy_final_model_dir_norm.exists():
-            resolved_norm = legacy_final_model_dir_norm
-        elif root_models_norm.exists():
-            resolved_norm = root_models_norm
-        else:
-            resolved_norm = legacy_final_norm
+    resolved_model = next((candidate for candidate in model_candidates if candidate.exists()), model_candidates[0])
+    resolved_norm = next((candidate for candidate in norm_candidates if candidate.exists()), norm_candidates[0])
     return resolved_model, resolved_norm
 
 
@@ -827,17 +859,18 @@ def evaluate_final_success_rate(
     run_name: str,
     env_config: UR5ReachEnvConfig,
     episodes: int,
+    seed: int,
 ) -> dict[str, float | int | None]:
     # 训练结束后单独跑一轮确定性评估，统一输出最终成功率统计。
     #
     # 这里固定加载 `final_model/` 下的最终产物，避免把“最佳中间模型”和“最终交付模型”
     # 混在一起。输出口径和 Warp 线保持一致：最小距离、最大回报、成功次数、成功率。
-    resolved_model, resolved_norm = resolve_test_paths(algo, run_name, "final")
+    resolved_model, resolved_norm = resolve_test_paths(algo, run_name, "final", env_config)
     eval_config = build_eval_env_config(env_config)
     env = make_vec_env(
         make_env_factory(eval_config, render_mode=None),
         n_envs=1,
-        seed=9876,
+        seed=int(seed),
         vec_env_cls=DummyVecEnv,
     )
     if resolved_norm.exists():
@@ -891,6 +924,8 @@ def test(
     env_config: UR5ReachEnvConfig,
     model_variant: str,
     episodes: int,
+    seed: int,
+    success_target: int | None,
     max_steps: int | None,
     render_mode: str,
     print_reward_terms: bool,
@@ -901,7 +936,7 @@ def test(
     # 1. 加载 VecNormalize 统计量，让测试时的观测分布和训练保持一致。
     # 2. 复用环境 `info` 中的调试信息，按需打印奖励分解。
     # 第一步：解析要加载的模型文件和归一化文件。
-    resolved_model, resolved_norm = resolve_test_paths(algo, run_name, model_variant)
+    resolved_model, resolved_norm = resolve_test_paths(algo, run_name, model_variant, env_config)
     if not resolved_model.exists():
         raise FileNotFoundError(f"模型不存在: {resolved_model}")
 
@@ -915,7 +950,7 @@ def test(
     env = make_vec_env(
         make_env_factory(eval_config, render_mode=None if render_mode == "none" else render_mode),
         n_envs=1,
-        seed=123,
+        seed=int(seed),
         vec_env_cls=DummyVecEnv,
     )
     if resolved_norm.exists():
@@ -923,18 +958,32 @@ def test(
         env = VecNormalize.load(str(resolved_norm), env)
         env.training = False
         env.norm_reward = False
-        print(f"[test_load]\n  vec_normalize={resolved_norm}", flush=True)
+        print(
+            f"[test_load]\n"
+            f"  disable_gripper_end_effector={bool(env_config.disable_gripper_end_effector)}\n"
+            f"  vec_normalize={resolved_norm}",
+            flush=True,
+        )
 
     # 第三步：按算法类型加载模型对象。
     model = _model_class(algo).load(str(resolved_model), env=env)
-    print(f"[test_load]\n  model={resolved_model}", flush=True)
+    print(
+        f"[test_load]\n"
+        f"  disable_gripper_end_effector={bool(env_config.disable_gripper_end_effector)}\n"
+        f"  model={resolved_model}",
+        flush=True,
+    )
 
     # 第四步：循环执行若干测试回合，并按需打印 reward 分解。
-    for episode_index in range(max(int(episodes), 1)):
+    total_successes = 0
+    requested_episodes = max(int(episodes), 1)
+    effective_success_target = None if success_target is None else max(int(success_target), 1)
+    for episode_index in range(requested_episodes):
         observation = env.reset()
         done = np.array([False], dtype=bool)
         total_reward = 0.0
         step = 0
+        episode_success = False
         while not bool(done[0]) and step < int(eval_config.episode_length):
             # 测试阶段固定使用确定性动作，方便比较不同实验。
             action, _ = model.predict(observation, deterministic=True)
@@ -945,26 +994,41 @@ def test(
             reward_value = float(reward[0]) if isinstance(reward, np.ndarray) else float(reward)
             total_reward += reward_value
             info0 = info[0] if isinstance(info, (list, tuple)) and info else {}
-            if print_reward_terms:
+            # 推理测试固定是单环境，这里按你的要求逐步输出。
+            print(
+                f"[test_step] episode={episode_index + 1} step={step}\n"
+                f"  reward={reward_value:.4f} "
+                f"distance={float(info0.get('distance', 0.0)):.4f} "
+                f"rel_speed={float(info0.get('relative_speed', info0.get('ee_speed', 0.0))):.4f} "
+                f"done_reason={info0.get('done_reason', 'running')}",
+                flush=True,
+            )
+            if print_reward_terms and isinstance(info0.get("reward_terms"), dict):
                 # `reward_terms` 来自环境 `info`，可以直接帮助分析策略当前主要吃的是哪一项奖励。
-                print(
-                    f"[test_step] episode={episode_index + 1} step={step}\n"
-                    f"  reward={reward_value:.4f} "
-                    f"distance={float(info0.get('distance', 0.0)):.4f} "
-                    f"done_reason={info0.get('done_reason', 'running')}",
-                    flush=True,
-                )
-                if isinstance(info0.get("reward_terms"), dict):
-                    print(f"  reward_terms={info0['reward_terms']}", flush=True)
+                print(f"  reward_terms={info0['reward_terms']}", flush=True)
+            if bool(done[0]):
+                episode_success = bool(info0.get("success"))
+                total_successes += int(episode_success)
         info0 = info[0] if isinstance(info, (list, tuple)) and info else {}
         print(
             f"[test_episode_end] episode={episode_index + 1}\n"
             f"  steps={step}\n"
             f"  total_reward={total_reward:.3f}\n"
             f"  distance={float(info0.get('distance', 0.0)):.4f}\n"
-            f"  done_reason={info0.get('done_reason', 'unknown')}",
+            f"  done_reason={info0.get('done_reason', 'unknown')}\n"
+            f"  episode_success={int(episode_success)} cumulative_successes={total_successes}",
             flush=True,
         )
+        if effective_success_target is not None and total_successes >= effective_success_target:
+            print(
+                f"[test_stop]\n"
+                f"  reason=success_target_reached\n"
+                f"  cumulative_successes={total_successes}\n"
+                f"  success_target={effective_success_target}\n"
+                f"  episodes_executed={episode_index + 1}",
+                flush=True,
+            )
+            break
     env.close()
     if render_mode == "human":
         sys.stdout.flush()
@@ -991,6 +1055,8 @@ def main() -> None:
             env_config=env_config,
             model_variant=args.model_variant,
             episodes=args.episodes,
+            seed=args.seed,
+            success_target=args.success_target,
             max_steps=args.max_steps,
             render_mode=args.render_mode,
             print_reward_terms=bool(args.print_reward_terms),

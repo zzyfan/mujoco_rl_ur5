@@ -20,6 +20,7 @@
 assets/
   robotiq_cxy/
     lab_env.xml
+    lab_env_no_gripper.xml
     meshes/
 docs/
   TRAINING_GUIDE.md
@@ -73,6 +74,7 @@ pip install -r requirements-warp.txt
 python train_ur5_reach.py --algo sac --run-name ur5_sac_main --total-timesteps 1500000
 python train_ur5_reach.py --algo td3 --run-name ur5_td3_main --total-timesteps 1500000
 python train_ur5_reach.py --algo ppo --run-name ur5_ppo_main --total-timesteps 1500000
+python train_ur5_reach.py --algo td3 --run-name ur5_td3_main --total-timesteps 1500000 --disable-gripper-end-effector
 ```
 
 测试示例：
@@ -80,13 +82,16 @@ python train_ur5_reach.py --algo ppo --run-name ur5_ppo_main --total-timesteps 1
 ```bash
 python train_ur5_reach.py --algo sac --run-name ur5_sac_main --test --model best --episodes 1 --render-mode human
 python train_ur5_reach.py --algo sac --run-name ur5_sac_main --test --model final --episodes 1 --render-mode human
+python train_ur5_reach.py --algo sac --run-name ur5_sac_main --test --model best --episodes 1 --render-mode human --disable-gripper-end-effector
 ```
 
 关键规则：
 
 - `--model best|final` 由代码自动解析模型目录
 - `--render-mode` 只接受 `none` 或 `human`
+- `--disable-gripper-end-effector` 会切换到不带夹爪的简化末端模型
 - 测试时不需要再手写 `--model-path` 或 `--normalize-path`
+- 带夹爪和不带夹爪的实验会自动分开保存，避免同名目录互相覆盖
 
 ## Warp Pipeline
 
@@ -138,6 +143,24 @@ runs/{local|server}/main/{algo}/{run_name}/
   final_eval.json
 ```
 
+若使用 `--disable-gripper-end-effector`，主线会自动改存到：
+
+```text
+runs/{local|server}/main/{algo}/{run_name}__no_gripper/
+  run_config.json
+  tensorboard/
+  best_model/
+    best_model.zip
+    vec_normalize.pkl
+  final_model/
+    final_model.zip
+    vec_normalize.pkl
+  interrupted/
+    interrupted_model.zip
+    vec_normalize.pkl
+  final_eval.json
+```
+
 Warp 线：
 
 ```text
@@ -159,9 +182,11 @@ runs/{local|server}/warp/{algo}/{run_name}/
 
 ## Task Semantics
 
-- 成功判定统一使用两个指尖 body 中点，而不是 `ee_link` 原点
-- 相对位置统一定义为 `target_position - finger_center`
-- 目标球本身也会参与碰撞惩罚，不再被白名单忽略
+- 主线参考点现在跟末端模型联动
+- 带夹爪模型：成功判定和相对位置都基于两指中点
+- 不带夹爪模型：成功判定和相对位置都基于 `ee_link` 原点
+- 相对位置统一定义为 `target_position - reference_point`
+- 目标球本身带碰撞体积；机器人碰到目标球会进入碰撞惩罚逻辑
 - 主线课程学习按回合阶段走 `fixed -> local_random -> full_random`
 - Warp 线当前仍使用显式采样模式：`fixed`、`small_random`、`full_random`
 
