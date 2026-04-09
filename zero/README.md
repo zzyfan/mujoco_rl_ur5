@@ -175,22 +175,17 @@ python train_robot_arm.py --test --final --episodes 5
 
 ## 6. 日志与进度条
 
-三条训练线已统一使用：
+三条训练线已统一为和 UR5 主线一致的输出风格：
 
-- `progress_bar=True`（Rich 进度条）
-- `EpisodeSummaryCallback`（按窗口聚合打印）
+- `progress_bar=True`（SB3 原生进度条）
+- `verbose=1`（SB3 标准训练信息）
+- `EvalCallback` 周期评估日志（`Eval num_timesteps=...`）
 
-聚合日志格式：
+终端会看到的核心信息包括：
 
-```text
-[Train Summary] eps_window=64 succ_window=... succ_total=... succ_rate=... coll_rate=... ret_mean=... dist_final_mean=... dist_min_mean=... speed_avg_mean=... reasons=...
-```
-
-日志设计目标：
-
-1. 保留进度条可读性  
-2. 避免逐步日志刷屏  
-3. 每次输出可直接判断收敛趋势  
+1. 训练进度条（步数、速度、预计剩余时间）  
+2. SB3 训练统计（loss、fps、time 等）  
+3. 周期评估结果（平均回报、回合长度、best model 提示）  
 
 ---
 
