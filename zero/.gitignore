@@ -1,0 +1,31 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Training artifacts
+logs/
+models/
+remote_artifacts/
+
+# Runtime logs
+pull_watcher.out.log
+pull_watcher.err.log
+train_queue.log
+
+# Jupyter
+.ipynb_checkpoints/
+
