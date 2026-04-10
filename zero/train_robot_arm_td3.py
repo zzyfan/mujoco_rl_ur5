@@ -5,7 +5,7 @@
 
 import numpy as np
 import gymnasium as gym
-from stable_baselines3 import PPO   
+from stable_baselines3 import TD3
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold, BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
@@ -36,7 +36,8 @@ class SaveVecNormalizeCallback(BaseCallback):
             # 保存VecNormalize参数到logs/best_model目录
             if self.verbose > 0:
                 print("保存与最佳模型对应的VecNormalize参数")
-            vec_normalize_path = "./logs/ppo/best_model"
+            vec_normalize_path = "./logs/td3/best_model"
+
             os.makedirs(vec_normalize_path, exist_ok=True)
             self.model.get_vec_normalize_env().save(os.path.join(vec_normalize_path, "vec_normalize.pkl"))
         
@@ -67,17 +68,17 @@ class ManualInterruptCallback(BaseCallback):
         """
         if self.model is not None:
             # 创建保存目录
-            os.makedirs("./models/ppo/interrupted", exist_ok=True)
+            os.makedirs("./models/td3/interrupted", exist_ok=True)
             
             # 保存模型
-            self.model.save("./models/ppo/interrupted/ppo_robot_arm_interrupted")
+            self.model.save("./models/td3/interrupted/td3_robot_arm_interrupted")
             
             # 保存VecNormalize参数
             env = self.model.get_vec_normalize_env()
             if env is not None:
-                env.save("./models/interrupted/vec_normalize.pkl")
+                env.save("./models/td3/interrupted/vec_normalize.pkl")
                 
-            print("已保存中断时的模型和参数到 ./models/ppo/interrupted/")
+            print("已保存中断时的模型和参数到 ./models/td3/interrupted/")
         
     def _on_step(self) -> bool:
         # 如果收到中断信号，停止训练
@@ -100,7 +101,7 @@ def train_robot_arm():
     n_actions = env.action_space.shape[-1]
     action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=2.5 * np.ones(n_actions))
     
-    # 自定义TD3神经网络结构
+    # 自定义神经网络结构
     # 这里我们定义一个更复杂的网络结构：
     # Actor网络: [512, 512, 256]
     # Critic网络: [512, 512, 256] (每个Q网络)
@@ -112,21 +113,24 @@ def train_robot_arm():
         activation_fn=nn.ReLU  # 使用ReLU激活函数
     )
     
-    # 创建PPO模型
-    model = PPO(
+    # 创建TD3模型
+    model = TD3(
         "MlpPolicy",
         env,
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=256,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.0,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
+        action_noise=action_noise,
+        verbose=1,
         device="auto",  # 自动选择设备(CUDA/CPU)
+        learning_rate=3e-4,
+        buffer_size=3000000,
+        learning_starts=10000,
+        batch_size=256,
+        tau=0.005,
+        gamma=0.99,
+        train_freq=1,
+        gradient_steps=1,
+        policy_delay=4,
+        target_policy_noise=0.2,
+        target_noise_clip=0.5,
         policy_kwargs=policy_kwargs  # 使用自定义网络结构
     )
     
@@ -138,8 +142,8 @@ def train_robot_arm():
     
     eval_callback = EvalCallback(
         eval_env,
-        best_model_save_path="./logs/best_model",
-        log_path="./logs/",
+        best_model_save_path="./logs/td3/best_model",
+        log_path="./logs/td3/",
         eval_freq=5000,
         deterministic=True,
         render=False
@@ -152,8 +156,8 @@ def train_robot_arm():
     manual_interrupt_callback = ManualInterruptCallback(verbose=1)
     
     # 创建日志目录
-    os.makedirs("./logs/ppo", exist_ok=True)
-    os.makedirs("./models/ppo", exist_ok=True)
+    os.makedirs("./logs", exist_ok=True)
+    os.makedirs("./models", exist_ok=True)
     
     print("开始训练...")
     print("提示: 按 Ctrl+C 可以中途停止训练并保存最后一次模型数据")
@@ -168,8 +172,8 @@ def train_robot_arm():
     )
     
     # 保存归一化环境和最终模型
-    env.save("./models/ppo/vec_normalize.pkl")
-    model.save("./models/ppo/ppo_robot_arm_final")
+    env.save("./models/td3/vec_normalize.pkl")
+    model.save("./models/td3/td3_robot_arm_final")
     
     end_time = time.time()
     print(f"训练完成，耗时: {end_time - start_time:.2f}秒")
@@ -177,8 +181,8 @@ def train_robot_arm():
     return model, env
 
 
-def test_robot_arm(model_path="./models/ppo/ppo_robot_arm_final", 
-                   normalize_path="./models/ppo/vec_normalize.pkl",
+def test_robot_arm(model_path="./models/td3/td3_robot_arm_final", 
+                   normalize_path="./models/td3/vec_normalize.pkl",
                    num_episodes=10):
     """
     测试训练好的模型
@@ -231,9 +235,9 @@ def test_robot_arm(model_path="./models/ppo/ppo_robot_arm_final",
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train or test robot arm with TD3")
     parser.add_argument("--test", action="store_true", help="Test the trained model")
-    parser.add_argument("--model-path", type=str, default="./models/ppo/ppo_robot_arm_final", 
+    parser.add_argument("--model-path", type=str, default="./models/td3/td3_robot_arm_final", 
                         help="Path to the model for testing")
-    parser.add_argument("--normalize-path", type=str, default="./models/ppo/vec_normalize.pkl",
+    parser.add_argument("--normalize-path", type=str, default="./models/td3/vec_normalize.pkl",
                         help="Path to the normalization parameters")
     parser.add_argument("--episodes", type=int, default=10,
                         help="Number of episodes to test")
