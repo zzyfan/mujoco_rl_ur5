@@ -164,7 +164,7 @@ def train_robot_arm():
         total_timesteps=5000000,
         callback=[eval_callback, save_vec_normalize_callback, manual_interrupt_callback],
         log_interval=1000,
-        progress_bar=True
+        progress_bar=True,
     )
     
     # 保存归一化环境和最终模型
