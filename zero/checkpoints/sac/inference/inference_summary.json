@@ -1,0 +1,9 @@
+{
+  "num_episodes": 5,
+  "success_rate": 0.0,
+  "mean_final_distance": 0.01284188039463478,
+  "mean_episode_length": 1000.0,
+  "collision_rate": 0.0,
+  "mean_smoothness": 0.09843994024272813,
+  "mean_reward": 1470.325122698024
+}

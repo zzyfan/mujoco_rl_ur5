@@ -1,0 +1,67 @@
+创建机械臂环境...
+开始训练...
+提示: 按 Ctrl+C 可以中途停止训练并保存最后一次模型数据
+训练渲染: 关闭
+Traceback (most recent call last):
+  File "F:\robot_rl_suite\zero\train_robot_arm_sac.py", line 452, in <module>
+    train_robot_arm(
+    ~~~~~~~~~~~~~~~^
+        train_render=args.train_render,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+        total_timesteps=max(1, args.total_timesteps),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "F:\robot_rl_suite\zero\train_robot_arm_sac.py", line 245, in train_robot_arm
+    model.learn(
+    ~~~~~~~~~~~^
+        total_timesteps=total_timesteps,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        reset_num_timesteps=not resume,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "F:\minconda\Lib\site-packages\stable_baselines3\sac\sac.py", line 313, in learn
+    return super().learn(
+           ~~~~~~~~~~~~~^
+        total_timesteps=total_timesteps,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+        progress_bar=progress_bar,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "F:\minconda\Lib\site-packages\stable_baselines3\common\off_policy_algorithm.py", line 335, in learn
+    rollout = self.collect_rollouts(
+        self.env,
+    ...<5 lines>...
+        log_interval=log_interval,
+    )
+  File "F:\minconda\Lib\site-packages\stable_baselines3\common\off_policy_algorithm.py", line 568, in collect_rollouts
+    new_obs, rewards, dones, infos = env.step(actions)
+                                     ~~~~~~~~^^^^^^^^^
+  File "F:\minconda\Lib\site-packages\stable_baselines3\common\vec_env\base_vec_env.py", line 222, in step
+    return self.step_wait()
+           ~~~~~~~~~~~~~~^^
+  File "F:\minconda\Lib\site-packages\stable_baselines3\common\vec_env\vec_normalize.py", line 181, in step_wait
+    obs, rewards, dones, infos = self.venv.step_wait()
+                                 ~~~~~~~~~~~~~~~~~~~^^
+  File "F:\minconda\Lib\site-packages\stable_baselines3\common\vec_env\dummy_vec_env.py", line 59, in step_wait
+    obs, self.buf_rews[env_idx], terminated, truncated, self.buf_infos[env_idx] = self.envs[env_idx].step(  # type: ignore[assignment]
+                                                                                  ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        self.actions[env_idx]
+        ^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "F:\minconda\Lib\site-packages\stable_baselines3\common\monitor.py", line 94, in step
+    observation, reward, terminated, truncated, info = self.env.step(action)
+                                                       ~~~~~~~~~~~~~^^^^^^^^
+  File "F:\robot_rl_suite\zero\robot_arm_env.py", line 296, in step
+    collision_detected, collision_pairs = self._detect_illegal_collision()
+                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "F:\robot_rl_suite\zero\robot_arm_env.py", line 118, in _detect_illegal_collision
+    (self._is_robot_collision_geom(g1) and g2 == "floor") or
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'RobotArmEnv' object has no attribute '_is_robot_collision_geom'
