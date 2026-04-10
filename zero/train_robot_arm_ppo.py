@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from stable_baselines3 import TD3
 """
 使用Stable-Baselines3的TD3算法训练机械臂进行位置跟踪
 """
@@ -195,7 +196,7 @@ def test_robot_arm(model_path="./models/ppo/ppo_robot_arm_final",
         env.norm_reward = False
     
     # 加载模型
-    model = TD3.load(model_path, env=env)
+    model = PPO.load(model_path, env=env)
     
     episode_rewards = []
     

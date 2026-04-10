@@ -194,7 +194,7 @@ def test_robot_arm(model_path="./models/sac/sac_robot_arm_final",
         env.norm_reward = False
     
     # 加载模型
-    model = TD3.load(model_path, env=env)
+    model = SAC.load(model_path, env=env)
     
     episode_rewards = []
     
